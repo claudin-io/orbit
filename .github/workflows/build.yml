@@ -1,0 +1,64 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Get version
+        if: github.event_name != 'push'
+        id: version
+        run: echo "version=$(./target/release/orbit --version 2>&1 | grep -oP '\d+\.\d+\.\d+')" >> $GITHUB_OUTPUT
+
+      - name: Rename binary
+        if: github.event_name != 'push'
+        run: mv target/release/orbit target/release/orbit-x86_64-linux
+
+      - name: Create Release
+        if: github.event_name != 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          files: target/release/orbit-x86_64-linux
+          make_latest: true
+          fail_on_unmatched_files: false
+
+  macos-arm64:
+    if: github.event_name != 'push'
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Get version
+        id: version
+        run: echo "version=$(./target/release/orbit --version 2>&1 | grep -oP '\d+\.\d+\.\d+')" >> $GITHUB_OUTPUT
+
+      - name: Rename binary
+        run: mv target/release/orbit target/release/orbit-arm64-macos
+
+      - name: Upload binary
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          files: target/release/orbit-arm64-macos
+          fail_on_unmatched_files: false
