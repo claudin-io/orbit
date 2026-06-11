@@ -18,6 +18,87 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 
+struct SubagentConfig {
+    cmd_str: String,
+    cwd: PathBuf,
+    task_timeout_secs: u64,
+}
+
+struct PendingTask {
+    prompt: String,
+}
+
+async fn spawn_subagent_task(config: &SubagentConfig, task_prompt: &str) -> Result<String, OrbitError> {
+    let agent: AcpAgent = config
+        .cmd_str
+        .parse()
+        .map_err(|e: agent_client_protocol::Error| OrbitError::Acp(format!("Failed to create subagent: {e}")))?;
+
+    let cwd = config.cwd.clone();
+    let timeout = Duration::from_secs(config.task_timeout_secs);
+    tokio::time::timeout(timeout, async {
+        Client
+            .builder()
+            .on_receive_request(
+                async move |request: RequestPermissionRequest,
+                            responder: Responder<RequestPermissionResponse>,
+                            _cx: ConnectionTo<Agent>| {
+                    let outcome = auto_approve(&request);
+                    responder.respond(RequestPermissionResponse::new(outcome))
+                },
+                on_receive_request!(),
+            )
+            .connect_with(agent, async move |cx: ConnectionTo<Agent>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+
+                let text = cx
+                    .build_session(&cwd)
+                    .block_task()
+                    .run_until({
+                        let task_prompt = task_prompt.to_string();
+                        async move |mut session| {
+                            session.send_prompt(&task_prompt)?;
+                            let mut output = String::new();
+                            loop {
+                                let update = session.read_update().await?;
+                                match update {
+                                    SessionMessage::SessionMessage(dispatch) => {
+                                        MatchDispatch::new(dispatch)
+                                            .if_notification(async |notif: SessionNotification| {
+                                                if let SessionUpdate::AgentMessageChunk(chunk) = &notif.update
+                                                    && let ContentBlock::Text(text) = &chunk.content {
+                                                        output.push_str(&text.text);
+                                                    }
+                                                Ok(())
+                                            })
+                                            .await
+                                            .otherwise_ignore()?;
+                                    }
+                                    SessionMessage::StopReason(_) => break,
+                                    _ => {}
+                                }
+                            }
+                            Ok(output)
+                        }
+                    })
+                    .await?;
+
+                Ok(text)
+            })
+            .await
+    })
+    .await
+    .map_err(|_| {
+        OrbitError::Acp(format!(
+            "Subagent task did not respond within {} seconds",
+            config.task_timeout_secs
+        ))
+    })?
+    .map_err(|e: agent_client_protocol::Error| OrbitError::Acp(e.to_string()))
+}
+
 fn auto_approve(request: &RequestPermissionRequest) -> RequestPermissionOutcome {
     match request.options.first() {
         Some(opt) => RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(opt.option_id.clone())),
@@ -33,12 +114,13 @@ async fn read_until_stop(
     session: &mut ActiveSession<'_, Agent>,
     events: &EventSink,
     cwd: &std::path::Path,
-) -> Result<String, agent_client_protocol::Error> {
+) -> Result<ReadResult, agent_client_protocol::Error> {
     let mut output = String::new();
     let mut line_buf = String::new();
     let mut tool_names: HashMap<String, String> = HashMap::new();
     let mut tool_starts: HashMap<String, Instant> = HashMap::new();
     let mut last_tool: Option<(String, Option<String>)> = None;
+    let mut pending_tasks: Vec<PendingTask> = Vec::new();
 
     loop {
         let update = session.read_update().await?;
@@ -85,6 +167,22 @@ async fn read_until_stop(
                                     });
                                 }
                                 tracing::info!(tool = %tool.title, id = %id, "tool started");
+
+                                if tool.title.to_lowercase().contains("task")
+                                    && let Some(raw) = &tool.raw_input
+                                {
+                                    let task_prompt = raw
+                                        .get("prompt")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    tracing::info!(
+                                        id = %id,
+                                        input_len = task_prompt.len(),
+                                        "task captured for subagent execution"
+                                    );
+                                    pending_tasks.push(PendingTask { prompt: task_prompt });
+                                }
                             }
                             SessionUpdate::ToolCallUpdate(up) => {
                                 let id = up.tool_call_id.to_string();
@@ -134,7 +232,53 @@ async fn read_until_stop(
         }
     }
 
-    Ok(output)
+    Ok(ReadResult { output, pending_tasks })
+}
+
+struct ReadResult {
+    output: String,
+    pending_tasks: Vec<PendingTask>,
+}
+
+async fn read_until_tasks_complete(
+    session: &mut ActiveSession<'_, Agent>,
+    prompt: &str,
+    events: &EventSink,
+    cwd: &std::path::Path,
+    subagent: Option<&SubagentConfig>,
+) -> Result<String, agent_client_protocol::Error> {
+    session.send_prompt(prompt)?;
+    let mut full_output = String::new();
+
+    loop {
+        let read_result = read_until_stop(session, events, cwd).await?;
+        full_output.push_str(&read_result.output);
+
+        if read_result.pending_tasks.is_empty() || subagent.is_none() {
+            if full_output.is_empty() {
+                full_output = read_result.output;
+            }
+            return Ok(full_output);
+        }
+
+        tracing::info!(
+            task_count = read_result.pending_tasks.len(),
+            "processing subagent tasks"
+        );
+
+        for task in &read_result.pending_tasks {
+            tracing::info!(prompt_len = task.prompt.len(), "executing subagent task");
+            let result = match spawn_subagent_task(subagent.unwrap(), &task.prompt).await {
+                Ok(text) => text,
+                Err(e) => format!("Subagent task failed: {e}"),
+            };
+            tracing::info!(result_len = result.len(), "subagent task completed, feeding back");
+            session.send_prompt(result)?;
+        }
+
+        let follow_up = read_until_stop(session, events, cwd).await?;
+        full_output.push_str(&follow_up.output);
+    }
 }
 
 enum SessionCommand {
@@ -171,6 +315,7 @@ pub struct AcpHarness {
     args: Vec<String>,
     cwd: PathBuf,
     prompt_timeout_secs: u64,
+    task_timeout_secs: u64,
 }
 
 impl AcpHarness {
@@ -180,6 +325,7 @@ impl AcpHarness {
             args,
             cwd,
             prompt_timeout_secs,
+            task_timeout_secs: prompt_timeout_secs,
         }
     }
 
@@ -191,33 +337,40 @@ impl AcpHarness {
         }
     }
 
+    fn subagent_config(&self) -> SubagentConfig {
+        SubagentConfig {
+            cmd_str: self.cmd_str(),
+            cwd: self.cwd.clone(),
+            task_timeout_secs: self.task_timeout_secs,
+        }
+    }
+
     async fn run_turn_in_session(
         session: &mut ActiveSession<'_, Agent>,
         prompt: &str,
         events: &EventSink,
         cwd: &std::path::Path,
+        subagent: Option<&SubagentConfig>,
     ) -> Result<String, agent_client_protocol::Error> {
-        session.send_prompt(prompt)?;
-        read_until_stop(session, events, cwd).await
+        read_until_tasks_complete(session, prompt, events, cwd, subagent).await
     }
-}
 
-#[async_trait]
-impl Harness for AcpHarness {
-    async fn run_turn(&self, role: Role, prompt: String, events: EventSink) -> Result<TurnOutcome, OrbitError> {
-        let started = Instant::now();
-        let prompt_bytes = prompt.len();
-        tracing::info!(role = ?role, prompt_bytes, "turn started");
-
+    async fn run_turn_once(
+        &self,
+        prompt: String,
+        events: EventSink,
+    ) -> Result<String, OrbitError> {
         let cmd_str = self.cmd_str();
         let cwd = self.cwd.clone();
         let timeout = Duration::from_secs(self.prompt_timeout_secs);
+        let subagent = self.subagent_config();
 
-        let agent: AcpAgent = cmd_str
-            .parse()
-            .map_err(|e: agent_client_protocol::Error| OrbitError::Acp(format!("Failed to create ACP agent: {e}")))?;
+        let agent: AcpAgent = match cmd_str.parse() {
+            Ok(a) => a,
+            Err(e) => return Err(OrbitError::Acp(format!("Failed to create ACP agent: {e}"))),
+        };
 
-        let full_text = tokio::time::timeout(timeout, async {
+        tokio::time::timeout(timeout, async {
             Client
                 .builder()
                 .on_receive_request(
@@ -229,33 +382,45 @@ impl Harness for AcpHarness {
                     },
                     on_receive_request!(),
                 )
-                .connect_with(agent, {
-                    let events = events.clone();
-                    async move |cx: ConnectionTo<Agent>| {
-                        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
-                            .block_task()
-                            .await?;
+                .connect_with(agent, async move |cx: ConnectionTo<Agent>| {
+                    cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                        .block_task()
+                        .await?;
 
-                        let text = cx
-                            .build_session(&cwd)
-                            .block_task()
-                            .run_until({
-                                let events = events.clone();
-                                let cwd = cwd.clone();
-                                async move |mut session| {
-                                    Self::run_turn_in_session(&mut session, &prompt, &events, &cwd).await
-                                }
-                            })
-                            .await?;
+                    let text = cx
+                        .build_session(&cwd)
+                        .block_task()
+                        .run_until({
+                            let prompt = prompt.clone();
+                            let events = events.clone();
+                            let cwd = cwd.clone();
+                            async move |mut session| {
+                                Self::run_turn_in_session(
+                                    &mut session, &prompt, &events, &cwd, Some(&subagent),
+                                )
+                                .await
+                            }
+                        })
+                        .await?;
 
-                        Ok(text)
-                    }
+                    Ok(text)
                 })
                 .await
         })
         .await
         .map_err(|_| OrbitError::Acp(format!("Agent did not respond within {} seconds", self.prompt_timeout_secs)))?
-        .map_err(|e: agent_client_protocol::Error| OrbitError::Acp(e.to_string()))?;
+        .map_err(|e: agent_client_protocol::Error| OrbitError::Acp(e.to_string()))
+    }
+}
+
+#[async_trait]
+impl Harness for AcpHarness {
+    async fn run_turn(&self, role: Role, prompt: String, events: EventSink) -> Result<TurnOutcome, OrbitError> {
+        let started = Instant::now();
+        let prompt_bytes = prompt.len();
+        tracing::info!(role = ?role, prompt_bytes, "turn started");
+
+        let full_text = self.run_turn_once(prompt, events).await?;
 
         tracing::info!(
             role = ?role,
@@ -274,6 +439,7 @@ impl Harness for AcpHarness {
         let cmd_str = self.cmd_str();
         let cwd = self.cwd.clone();
         let timeout_secs = self.prompt_timeout_secs;
+        let subagent = self.subagent_config();
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
 
         tokio::spawn(async move {
@@ -315,7 +481,7 @@ impl Harness for AcpHarness {
                                     match cmd {
                                         SessionCommand::RunTurn { prompt, result } => {
                                             let text = match Self::run_turn_in_session(
-                                                &mut session, &prompt, &events, &cwd,
+                                                &mut session, &prompt, &events, &cwd, Some(&subagent),
                                             )
                                             .await
                                             {
