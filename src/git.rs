@@ -91,7 +91,7 @@ Output ONLY this JSON:
 
 pub async fn dispatch(action: &GitCliAction, events: EventSink) -> Result<(), OrbitError> {
     match action {
-        GitCliAction::Commit { all } => run_git_commit_loop(*all, events).await,
+        GitCliAction::Commit { all, yes } => run_git_commit_loop(*all, *yes, events).await,
     }
 }
 
@@ -113,7 +113,7 @@ fn confirm(message: &str, default: bool) -> bool {
     }
 }
 
-async fn run_git_commit_loop(all: bool, events: EventSink) -> Result<(), OrbitError> {
+async fn run_git_commit_loop(all: bool, yes: bool, events: EventSink) -> Result<(), OrbitError> {
     let target = std::env::current_dir().map_err(OrbitError::Io)?;
     let mut config = config::load(None, &target);
     if config.harness.command == "claude-code-acp"
@@ -195,85 +195,57 @@ async fn run_git_commit_loop(all: bool, events: EventSink) -> Result<(), OrbitEr
                 render::c(&analysis, render::YLW)
             );
         }
-        for r in &plan_rubric {
-            let mark = match r.weight {
-                3 => "!!!",
-                2 => "!! ",
-                _ => "!  ",
-            };
-            let _ = writeln!(
-                std::io::stdout(),
-                "  {} {} {}",
-                render::c(mark, render::YLW),
-                render::c(&r.criterion, render::BLD),
-                render::c(&r.description, render::DIM)
-            );
-        }
+
+        emit!(
+            events,
+            OrbitEvent::PromptCreated {
+                prompt_summary: format!("Git commit: {}", plan_text.lines().next().unwrap_or("See plan").trim()),
+                rubric: plan_rubric.clone(),
+            }
+        );
 
         emit!(events, OrbitEvent::PhaseChanged(RunPhase::GitReviewing));
 
         let eval_outcome = run_plan_evaluator(&harness, &plan_text, &rubric_text, &events).await?;
 
-        let _ = writeln!(
-            std::io::stdout(),
-            "  {} {}",
-            render::c("───", render::DIM),
-            render::c("VERDICT", render::BLD)
+        emit!(
+            events,
+            OrbitEvent::EvalVerdict {
+                approved: eval_outcome.approved,
+                feedback: eval_outcome.feedback.clone(),
+                diagnosis: eval_outcome.diagnosis.clone(),
+                results: eval_outcome.results.clone(),
+            }
         );
-        for r in &eval_outcome.results {
-            let sym = if r.pass {
-                render::c("✓", render::GRN)
-            } else {
-                render::c("✗", render::RED)
-            };
-            let _ = writeln!(
-                std::io::stdout(),
-                "  {} {}  {}",
-                sym,
-                render::c(&r.criterion, render::BLD),
-                render::c(&r.evidence, render::DIM)
-            );
-        }
+
+        let _ = std::io::stdout().flush();
 
         if !eval_outcome.approved {
-            plan_feedback = eval_outcome.feedback.clone();
-            plan_diagnosis = eval_outcome.diagnosis.clone();
-            let _ = writeln!(
-                std::io::stdout(),
-                "  {} {} {}",
-                render::c("●", render::RED),
-                render::c("REJECTED", render::BLD),
-                render::c(&eval_outcome.feedback, render::YLW)
-            );
+            plan_feedback = eval_outcome.feedback;
+            plan_diagnosis = eval_outcome.diagnosis;
             if attempt < max_attempts {
                 let _ = writeln!(
                     std::io::stdout(),
-                    "  {} {}",
-                    render::c("↻", render::DIM),
-                    render::c("Revising plan...", render::DIM)
+                    "  {}",
+                    render::c("Plan rejected. Revising...", render::YLW)
                 );
             }
             continue;
         }
 
-        let _ = writeln!(
-            std::io::stdout(),
-            "  {} {}",
-            render::c("●", render::GRN),
-            render::c("APPROVED", render::BLD)
-        );
-
-        let confirmed = confirm("Proceed with this commit?", true);
-        if !confirmed {
-            let _ = writeln!(
-                std::io::stdout(),
-                "  {} {}",
-                render::c("●", render::RED),
-                render::c("Aborted by user.", render::BLD)
-            );
-            emit!(events, OrbitEvent::PhaseChanged(RunPhase::Done));
-            emit!(events, OrbitEvent::RunFinished { exit_code: 0 });
-            return Ok(());
+        if !yes {
+            let confirmed = confirm("Proceed with this commit?", true);
+            if !confirmed {
+                let _ = writeln!(
+                    std::io::stdout(),
+                    "  {} {}",
+                    render::c("●", render::RED),
+                    render::c("Aborted by user.", render::BLD)
+                );
+                emit!(events, OrbitEvent::PhaseChanged(RunPhase::Done));
+                emit!(events, OrbitEvent::RunFinished { exit_code: 0 });
+                return Ok(());
+            }
         }
 
         emit!(events, OrbitEvent::PhaseChanged(RunPhase::GitCommitting));

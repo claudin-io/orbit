@@ -66,6 +66,9 @@ pub enum GitCliAction {
     Commit {
         #[arg(long, short, help = "Stage all changes before committing")]
         all: bool,
+
+        #[arg(long, short = 'y', help = "Skip confirmation prompt")]
+        yes: bool,
     },
 }
 
@@ -238,7 +241,7 @@ mod tests {
     fn test_git_commit_parses() {
         let cli = Cli::parse_from(["orbit", "git", "commit"]);
         match &cli.command {
-            Command::Git { action } => assert!(matches!(action, GitCliAction::Commit { all: false })),
+            Command::Git { action } => assert!(matches!(action, GitCliAction::Commit { all: false, .. })),
             _ => panic!("expected Git"),
         }
     }
@@ -247,7 +250,16 @@ mod tests {
     fn test_git_commit_all_parses() {
         let cli = Cli::parse_from(["orbit", "git", "commit", "--all"]);
         match &cli.command {
-            Command::Git { action } => assert!(matches!(action, GitCliAction::Commit { all: true })),
+            Command::Git { action } => assert!(matches!(action, GitCliAction::Commit { all: true, .. })),
+            _ => panic!("expected Git"),
+        }
+    }
+
+    #[test]
+    fn test_git_commit_yes_parses() {
+        let cli = Cli::parse_from(["orbit", "git", "commit", "-y"]);
+        match &cli.command {
+            Command::Git { action } => assert!(matches!(action, GitCliAction::Commit { yes: true, .. })),
             _ => panic!("expected Git"),
         }
     }
