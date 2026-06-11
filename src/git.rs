@@ -2,38 +2,32 @@ use crate::cli::GitCliAction;
 use crate::config;
 use crate::error::OrbitError;
 use crate::events::{EventSink, emit};
-use crate::harness::Harness;
+use crate::harness::{Harness, HarnessSession};
 use crate::harness::acp::AcpHarness;
-use crate::prompts::{extract_fenced_json, render};
+use crate::prompts::{extract_fenced_json, render, sanitize_llm_json};
 use crate::render;
 use crate::types::{EvalVerdict, OrbitEvent, PrompterOutput, Role, RunPhase};
 use std::collections::HashMap;
 use std::io::Write;
 
-const PROMPT_GIT_PLANNER: &str = r#"You are a Git Commit Planner. Your job is to analyze the current git state and produce a structured commit plan.
+const PROMPT_GIT_PLANNER: &str = r#"You are a Git Commit Planner. Analyze git state and produce a commit plan.
 
-Use your tools to:
-1. Run `git status` to see the current state
-2. Run `git diff` (unstaged changes) and/or `git diff --cached` (staged changes) to examine the actual code changes
-3. Study the changes carefully — understand what was modified, added, or removed and why
-4. Decide on the commit strategy:
-   - Should this be one commit or multiple logical commits?
-   - What files belong in each commit?
-   - What is the appropriate conventional commit type (feat, fix, chore, refactor, docs, test, style)?
-   - What scope and subject best describe the change?
-   - Write a clear, descriptive commit message body
+Fast rules:
+- Run git status + git diff (2 bash calls max)
+- No task tool
+- Do not explore beyond git output
+
+Read git status and diff, then decide: one commit or multi? What type/scope/message?
 
 {{#if stage_all}}
 The user wants to commit ALL changes (--all flag). Your plan must include `git add -A` before committing.
 {{/if}}
 
-Your plan must include exact git commands to execute.
-
-Output ONLY this JSON — no markdown fences, no extra text:
-{"prompt": "Goal: ...\n\nContext: ...\n\nPlan:\n1. git add <files>\n   git commit -m 'type(scope): subject'\n\nRequirements:\n1. ...\n\nConstraints:\n- ...", "rubric": [{"criterion": "...", "description": "...", "weight": 3}], "analysis": "Brief reasoning about the strategy"}
+Output ONLY this JSON:
+{"prompt": "Goal: ...\n\nContext: ...\n\nPlan:\n1. git add <files>\n   git commit -m 'type(scope): subject'\n\nRequirements:\n1. ...\n\nConstraints:\n- ...", "rubric": [{"criterion": "...", "description": "...", "weight": 3}], "analysis": "Brief reasoning"}
 "#;
 
-const PROMPT_GIT_EVALUATOR: &str = r#"You are a Git Commit Plan Evaluator. Check if the proposed commit plan is well-structured and appropriate.
+const PROMPT_GIT_EVALUATOR: &str = r#"You are a Git Commit Plan Evaluator. Check the proposed commit plan.
 
 ---COMMIT PLAN---
 {{plan}}
@@ -43,17 +37,11 @@ const PROMPT_GIT_EVALUATOR: &str = r#"You are a Git Commit Plan Evaluator. Check
 {{rubric}}
 ---END RUBRIC---
 
-Evaluate each rubric criterion against the plan. Consider:
-- Are the right files grouped together (cohesive changes)?
-- Is the commit message well-formed (conventional commits)?
-- Does the conventional commit type match the actual changes?
-- Is the scope appropriate?
-- Would this commit be easy to understand in the future?
+Fast rules: no task tool, no exploration — just read the plan and rubric above.
 
-On PASS: approved=true with specific evidence
-On FAIL: approved=false with specific feedback on what to fix
+Is the plan correct? Cohesive files? Good message? Right type/scope?
 
-Output ONLY this JSON — no markdown fences, no extra text:
+Output ONLY this JSON:
 {"approved": true, "feedback": "ok", "diagnosis": "All criteria met", "results": [{"criterion": "...", "pass": true, "evidence": "..."}]}
 "#;
 
@@ -63,30 +51,30 @@ const PROMPT_GIT_COMMITTER: &str = r#"You are a Git Committer. Execute the appro
 {{plan}}
 ---END COMMIT PLAN---
 
-Execute each step of the plan in order using your bash tool:
-1. Run `git add <files>` for each group of files
-2. Run `git commit -m 'message'` for each commit
+Execute:
+1. git add <files>
+2. git commit -m 'message'
 
-After executing, verify with `git log --oneline -3` and `git status` that everything looks correct.
+Verify with git log --oneline -1. Report what was done.
 
-Report what was done: which files were staged, the commit message used, and the resulting commit hash.
+No task tool.
 "#;
 
-const PROMPT_GIT_PLANNER_REVISION: &str = r#"You are a Git Commit Planner. Your previous commit plan was rejected by the evaluator. Revise it based on the feedback.
+const PROMPT_GIT_PLANNER_REVISION: &str = r#"You are a Git Commit Planner. Previous plan was rejected. Revise.
 
----PREVIOUS EVALUATION---
-Feedback: {{eval_feedback}}
-Diagnosis: {{eval_diagnosis}}
+---EVALUATION---
+{{eval_feedback}}
+{{eval_diagnosis}}
 ---END EVALUATION---
 
----PREVIOUS PLAN (for reference)---
+---PREVIOUS PLAN---
 {{previous_plan}}
 ---END PREVIOUS PLAN---
 
-Fix the issues identified in the evaluation. Be specific about what changed and why. You may need to re-run git commands to check the current state.
+Fast rules: no task tool, no re-exploration. Fix what the evaluation says.
 
 Output ONLY this JSON:
-{"prompt": "Goal: ...\n\nContext: ...\n\nPlan:\n1. git add <files>\n   git commit -m 'type(scope): subject'\n\nRequirements:\n1. ...\n\nConstraints:\n- ...", "rubric": [{"criterion": "...", "description": "...", "weight": 3}], "analysis": "Brief explanation of what was wrong and how this revision fixes it."}
+{"prompt": "Goal: ...\n\nContext: ...\n\nPlan:\n1. git add <files>\n   git commit -m 'type(scope): subject'\n\nRequirements:\n1. ...\n\nConstraints:\n- ...", "rubric": [{"criterion": "...", "description": "...", "weight": 3}], "analysis": "Brief explanation"}
 "#;
 
 pub async fn dispatch(action: &GitCliAction, events: EventSink) -> Result<(), OrbitError> {
@@ -141,6 +129,7 @@ async fn run_git_commit_loop(all: bool, yes: bool, events: EventSink) -> Result<
         config.r#loop.prompt_timeout_secs,
     );
 
+    let mut session = harness.start_session(events.clone()).await?;
     let max_attempts = config.r#loop.max_attempts;
     let mut plan_text = String::new();
     let mut plan_feedback = String::new();
@@ -168,9 +157,7 @@ async fn run_git_commit_loop(all: bool, yes: bool, events: EventSink) -> Result<
             render(PROMPT_GIT_PLANNER_REVISION, &ctx)
         };
 
-        let planner_outcome = harness
-            .run_turn(Role::Prompter, planner_prompt, events.clone())
-            .await?;
+        let planner_outcome = session.run_turn(Role::Prompter, planner_prompt).await?;
         let output = parse_git_planner_output(&planner_outcome.full_text)?;
 
         plan_text = output.prompt;
@@ -206,7 +193,7 @@ async fn run_git_commit_loop(all: bool, yes: bool, events: EventSink) -> Result<
 
         emit!(events, OrbitEvent::PhaseChanged(RunPhase::GitReviewing));
 
-        let eval_outcome = run_plan_evaluator(&harness, &plan_text, &rubric_text, &events).await?;
+        let eval_outcome = run_plan_evaluator(&mut session, &plan_text, &rubric_text).await?;
 
         emit!(
             events,
@@ -253,9 +240,7 @@ async fn run_git_commit_loop(all: bool, yes: bool, events: EventSink) -> Result<
         let mut ctx: HashMap<&str, &str> = HashMap::new();
         ctx.insert("plan", &plan_text);
         let committer_prompt = render(PROMPT_GIT_COMMITTER, &ctx);
-        let outcome = harness
-            .run_turn(Role::Coder, committer_prompt, events.clone())
-            .await?;
+        let outcome = session.run_turn(Role::Coder, committer_prompt).await?;
 
         emit!(
             events,
@@ -297,22 +282,22 @@ async fn run_git_commit_loop(all: bool, yes: bool, events: EventSink) -> Result<
 }
 
 async fn run_plan_evaluator(
-    harness: &dyn Harness,
+    session: &mut dyn HarnessSession,
     plan: &str,
     rubric: &str,
-    events: &EventSink,
 ) -> Result<EvalVerdict, OrbitError> {
     let mut ctx = HashMap::new();
     ctx.insert("plan", plan);
     ctx.insert("rubric", rubric);
     let prompt = render(PROMPT_GIT_EVALUATOR, &ctx);
-    let outcome = harness.run_turn(Role::Evaluator, prompt, events.clone()).await?;
+    let outcome = session.run_turn(Role::Evaluator, prompt).await?;
     parse_eval_verdict(&outcome.full_text)
 }
 
 fn parse_git_planner_output(text: &str) -> Result<PrompterOutput, OrbitError> {
     let raw = text.trim();
-    let json_str = extract_fenced_json(raw).or_else(|| {
+    let raw = sanitize_llm_json(raw);
+    let json_str = extract_fenced_json(&raw).or_else(|| {
         let t = raw.trim();
         if t.starts_with('{') {
             Some(t)
@@ -339,7 +324,8 @@ fn parse_git_planner_output(text: &str) -> Result<PrompterOutput, OrbitError> {
 
 fn parse_eval_verdict(text: &str) -> Result<EvalVerdict, OrbitError> {
     let raw = text.trim();
-    let json_str = extract_fenced_json(raw).or_else(|| {
+    let raw = sanitize_llm_json(raw);
+    let json_str = extract_fenced_json(&raw).or_else(|| {
         let t = raw.trim();
         if t.starts_with('{') {
             Some(t)

@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let cli = Cli::parse();
 
-    if matches!(cli.command, orbit::cli::Command::Run { .. }) {
+    if matches!(cli.command, orbit::cli::Command::Run { .. } | orbit::cli::Command::Git { .. }) {
         orbit::render::print_banner(orbit::cli::ORBIT_VERSION);
     }
 

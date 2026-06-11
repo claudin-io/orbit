@@ -14,6 +14,10 @@ impl Harness for FakeHarness {
             full_text: String::new(),
         })
     }
+
+    async fn start_session(&self, _events: EventSink) -> Result<Box<dyn HarnessSession>, OrbitError> {
+        Ok(Box::new(FakeHarnessSession))
+    }
 }
 
 pub struct FakeHarnessSession;

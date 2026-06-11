@@ -33,15 +33,16 @@ Orbit -> Evaluator: score result against rubric
 
 ## Simplicity
 
-Orbit is one binary (`orbit`), one loop (`for`), three ACP agents (Prompter → Coder → Evaluator). Every design decision removes something so the remaining thing works well.
+Orbit is one binary (`orbit`), three subcommands, each a single ACP loop. Every design decision removes something so the remaining thing works well.
 
-- **One binary, one loop** — no daemon, no background process, no persistent state. You invoke `orbit run`, it reads a spec, loops through three ACP agents, and exits. Process goes away, everything goes away.
+- **One binary, three loops** — no daemon, no background process, no persistent state. You invoke `orbit run`, `orbit git commit`, or `orbit acp` — it runs a loop through ACP agents and exits. Process goes away, everything goes away.
 - **No TUI** — the renderer writes ANSI escape codes to stdout with no ncurses, no ratatui, no interactive widgets. A single `tokio::spawn` redraws a fixed number of lines. Killable, pipeable (`orbit run | tee log`), testable without a terminal.
 - **No resume, no checkpoint** — every run starts from scratch. State is a Rust struct on the stack. No crash recovery, no serialization, no migration.
 - **No database, no cache** — no SQLite, no Redis, no file-based persistence. Nothing to corrupt, vacuum, or migrate.
 - **No test runner** — Orbit does not execute `cargo test` or `npm test`. Verification is delegated to the Evaluator ACP agent against a rubric.
 - **One ACP dependency** — `agent-client-protocol` v0.14 over subprocess stdio JSON-RPC. No HTTP server, no gRPC, no SDK wrapper.
 - **Version scheme** — `0.1.YYMMDD` from `build.rs`. No semantic versioning treadmill; the date tells you how fresh the build is.
+- **Same pattern, different task** — `orbit git commit` follows the identical `for`-loop pattern as `run`: Planner → Evaluator (loop with feedback) → Executor. No shared state, no new infrastructure.
 
 The complexity budget goes where it matters: JSON sanitization, rubric-based evaluation with weighted criteria, and retry with revision feedback.
 
@@ -115,6 +116,46 @@ orbit acp handshake
 |---|---|
 | `set-default <cmd>` | Save default ACP agent command to `~/.orbit/config.toml` |
 | `handshake` | Test ACP agent connectivity |
+
+### `orbit git commit` — AI-assisted git commits
+
+```bash
+# Analyze unstaged changes and commit
+orbit git commit
+
+# Stage everything and commit
+orbit git commit --all
+
+# Skip confirmation prompt
+orbit git commit -y
+```
+
+`orbit git commit` runs a 3-agent loop to produce well-structured commits:
+
+```
+Orbit -> Planner:   read git status + diff, produce commit plan + rubric
+Orbit -> Evaluator: score plan against rubric
+                      |
+         +------------+------------+
+         |                         |
+      approved                  rejected
+         |                         |
+      done                Planner revises with
+                              evaluator feedback
+                              (loop until approved
+                               or max_attempts hit)
+         |
+Orbit -> Committer: execute `git add` + `git commit`
+```
+
+The same `for`-loop pattern as `orbit run`: Planner produces a plan and rubric, Evaluator scores it and may reject (triggering a revision), then the Committer executes. No TUI, no state, no database — just agent turns over stdio.
+
+#### Flags
+
+| Flag | Description | Default |
+|---|---|---|
+| `--all` / `-a` | Stage all changes before committing | `false` |
+| `-y` | Skip confirmation prompt | `false` |
 
 ### Interactive spec editor
 
@@ -199,6 +240,7 @@ src/
   types.rs             # Core types (Role, PrompterOutput, EvalVerdict, RunPhase)
   error.rs             # Error types with exit codes
   events.rs            # Event channel for headless renderer
+  git.rs               # Git commit 3-agent loop (planner, evaluator, committer)
   lib.rs               # Module declarations
   harness/
     mod.rs             # Harness trait (run_turn)

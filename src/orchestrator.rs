@@ -3,9 +3,9 @@ use crate::cli::Cli;
 use crate::config;
 use crate::error::OrbitError;
 use crate::events::{EventSink, emit};
-use crate::harness::Harness;
+use crate::harness::{Harness, HarnessSession};
 use crate::harness::acp::AcpHarness;
-use crate::prompts::{EVALUATOR_TEMPLATE, PROMPTER_REVISION_TEMPLATE, PROMPTER_TEMPLATE, extract_fenced_json, render};
+use crate::prompts::{EVALUATOR_TEMPLATE, PROMPTER_REVISION_TEMPLATE, PROMPTER_TEMPLATE, extract_fenced_json, render, sanitize_llm_json};
 use crate::types::{EvalVerdict, OrbitEvent, PrompterOutput, Role, RunPhase};
 use std::collections::HashMap;
 
@@ -112,9 +112,12 @@ async fn run_simple_loop(run_config: config::RunConfig, events: EventSink) -> Re
         config.r#loop.prompt_timeout_secs,
     );
 
+    let events_for_session = events.clone();
+    let mut session = harness.start_session(events_for_session).await?;
+
     emit!(events, OrbitEvent::PhaseChanged(RunPhase::Prompting));
 
-    let prompter_output = run_prompter(&harness, &spec_content, &events).await?;
+    let prompter_output = run_prompter(&mut session, &spec_content).await?;
     let prompt_summary = extract_goal(&prompter_output.prompt);
 
     emit!(
@@ -139,7 +142,7 @@ async fn run_simple_loop(run_config: config::RunConfig, events: EventSink) -> Re
             }
         );
 
-        let coder_outcome = harness.run_turn(Role::Coder, prompt.clone(), events.clone()).await?;
+        let coder_outcome = session.run_turn(Role::Coder, prompt.clone()).await?;
         let coder_text = coder_outcome.full_text;
 
         let coder_summary = summarize_coder_output(&coder_text);
@@ -150,7 +153,7 @@ async fn run_simple_loop(run_config: config::RunConfig, events: EventSink) -> Re
         emit!(events, OrbitEvent::PhaseChanged(RunPhase::Evaluating));
 
         let eval_outcome =
-            run_evaluator(&harness, &spec_content, &rubric_text, &coder_text, &events).await?;
+            run_evaluator(&mut session, &spec_content, &rubric_text, &coder_text).await?;
         let results = eval_outcome.results.clone();
 
         if eval_outcome.approved {
@@ -182,12 +185,11 @@ async fn run_simple_loop(run_config: config::RunConfig, events: EventSink) -> Re
         if attempt < max_attempts {
             emit!(events, OrbitEvent::PhaseChanged(RunPhase::Prompting));
             prompt = run_prompter_revision(
-                &harness,
+                &mut session,
                 &spec_content,
                 &coder_text,
                 &eval_outcome.feedback,
                 &eval_outcome.diagnosis,
-                &events,
             )
             .await?;
         }
@@ -232,24 +234,22 @@ fn summarize_coder_output(text: &str) -> String {
 }
 
 async fn run_prompter(
-    harness: &dyn Harness,
+    session: &mut dyn HarnessSession,
     spec: &str,
-    events: &EventSink,
 ) -> Result<PrompterOutput, OrbitError> {
     let mut ctx = HashMap::new();
     ctx.insert("spec", spec);
     let prompt = render(PROMPTER_TEMPLATE, &ctx);
-    let outcome = harness.run_turn(Role::Prompter, prompt, events.clone()).await?;
+    let outcome = session.run_turn(Role::Prompter, prompt).await?;
     parse_prompter_output(&outcome.full_text)
 }
 
 async fn run_prompter_revision(
-    harness: &dyn Harness,
+    session: &mut dyn HarnessSession,
     spec: &str,
     coder_output: &str,
     eval_feedback: &str,
     eval_diagnosis: &str,
-    events: &EventSink,
 ) -> Result<String, OrbitError> {
     let mut ctx = HashMap::new();
     ctx.insert("spec", spec);
@@ -257,59 +257,24 @@ async fn run_prompter_revision(
     ctx.insert("eval_feedback", eval_feedback);
     ctx.insert("eval_diagnosis", eval_diagnosis);
     let prompt = render(PROMPTER_REVISION_TEMPLATE, &ctx);
-    let outcome = harness.run_turn(Role::Prompter, prompt, events.clone()).await?;
+    let outcome = session.run_turn(Role::Prompter, prompt).await?;
     let parsed = parse_prompter_output(&outcome.full_text)?;
     Ok(parsed.prompt)
 }
 
 async fn run_evaluator(
-    harness: &dyn Harness,
+    session: &mut dyn HarnessSession,
     spec: &str,
     rubric: &str,
     coder_output: &str,
-    events: &EventSink,
 ) -> Result<EvalVerdict, OrbitError> {
     let mut ctx = HashMap::new();
     ctx.insert("spec", spec);
     ctx.insert("rubric", rubric);
     ctx.insert("coder_output", coder_output);
     let prompt = render(EVALUATOR_TEMPLATE, &ctx);
-    let outcome = harness.run_turn(Role::Evaluator, prompt, events.clone()).await?;
+    let outcome = session.run_turn(Role::Evaluator, prompt).await?;
     parse_eval_verdict(&outcome.full_text)
-}
-
-fn sanitize_llm_json(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for ch in text.chars() {
-        if in_string {
-            if escaped {
-                escaped = false;
-                out.push(ch);
-            } else if ch == '\\' {
-                escaped = true;
-                out.push(ch);
-            } else if ch == '"' {
-                in_string = false;
-                out.push(ch);
-            } else if ch == '\n' || ch == '\r' {
-                out.push_str("\\n");
-            } else if ch == '\t' {
-                out.push_str("\\t");
-            } else if ch.is_control() {
-            } else {
-                out.push(ch);
-            }
-        } else {
-            if ch == '"' {
-                in_string = true;
-            }
-            out.push(ch);
-        }
-    }
-    out
 }
 
 fn dump_debug_agent_output(text: &str, label: &str) {
@@ -464,7 +429,8 @@ mod tests {
     async fn test_run_prompter_with_fake_harness() {
         let harness = FakeHarness;
         let (tx, _rx) = events::channel();
-        let result = run_prompter(&harness, "do something", &tx).await;
+        let mut session = harness.start_session(tx).await.unwrap();
+        let result = run_prompter(&mut session, "do something").await;
         assert!(result.is_err(), "fake harness returns empty text, should fail to parse");
     }
 
@@ -472,7 +438,8 @@ mod tests {
     async fn test_run_evaluator_with_fake_harness() {
         let harness = FakeHarness;
         let (tx, _rx) = events::channel();
-        let result = run_evaluator(&harness, "spec", "rubric", "output", &tx).await;
+        let mut session = harness.start_session(tx).await.unwrap();
+        let result = run_evaluator(&mut session, "spec", "rubric", "output").await;
         assert!(result.is_err(), "fake harness returns empty text, should fail to parse");
     }
 }

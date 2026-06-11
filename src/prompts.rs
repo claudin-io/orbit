@@ -1,19 +1,13 @@
-pub const PROMPTER_TEMPLATE: &str = r#"You are the Planner. Given a specification, produce a structured implementation plan.
+pub const PROMPTER_TEMPLATE: &str = r#"You are the Planner. Produce a structured implementation plan from the spec.
 
-Read the spec below, explore the codebase, then output ONLY a JSON object — no extra text, no markdown fences.
+Rules:
+1. Be fast — no more than 3 tool calls (read/grep) total
+2. Do NOT use the task tool — read files directly
+3. Only check files directly relevant to the spec
 
-The JSON must have:
-- "prompt": a string for the Coder agent, structured with these sections:
-  . "Goal:" — one line: what does success look like?
-  . "Context:" — key facts: language, framework, relevant files, conventions
-  . "Plan:" — what to build: files to create or modify, what each should contain
-  . "Requirements:" — numbered checklist the implementation must satisfy
-  . "Constraints:" — rules to follow (use existing patterns, don't break tests, etc.)
+Read the spec, check 1-2 key files if needed, then output ONLY this JSON:
 
-- "rubric": an array of objects, each with:
-  . "criterion": short name (e.g. "Functional Completeness")
-  . "description": what pass/fail looks like, specific and measurable
-  . "weight": importance 1-3 (3 = critical, must pass)
+{"prompt": "Goal: ...\n\nContext: ...\n\nPlan: ...\n\nRequirements:\n1. ...\n\nConstraints:\n- ...", "rubric": [{"criterion": "...", "description": "...", "weight": 3}]}
 
 ---
 ---SPEC---
@@ -21,13 +15,15 @@ The JSON must have:
 ---END SPEC---
 ---
 
-Output ONLY the JSON object. No markdown, no commentary.
-{"prompt": "Goal: ...\n\nContext: ...\n\nPlan: ...\n\nRequirements:\n1. ...\n\nConstraints:\n- ...", "rubric": [{"criterion": "...", "description": "...", "weight": 3}]}
+Output ONLY the JSON. No markdown fences, no commentary.
 "#;
 
 pub const EVALUATOR_TEMPLATE: &str = r#"You are the Evaluator. Check if the Coder's implementation meets the spec and rubric.
 
-Read the project files to verify. Use read/grep/bash to check actual code.
+Rules:
+1. Be fast — max 3 read/grep calls
+2. No task tool — read files directly
+3. Check only files the coder claimed to have created/modified
 
 ---SPEC---
 {{spec}}
@@ -37,22 +33,22 @@ Read the project files to verify. Use read/grep/bash to check actual code.
 {{rubric}}
 ---END RUBRIC---
 
-Evaluate each rubric criterion against the actual implementation. For each criterion:
-- PASS if the actual code satisfies it
-- FAIL if it does not, with specific evidence (file, line, what's wrong)
-
 Output ONLY this JSON:
 {"approved": true, "feedback": "ok", "diagnosis": "All criteria met", "results": [{"criterion": "...", "pass": true, "evidence": "..."}]}
 
 - approved: true ONLY if ALL criteria pass
-- feedback: if rejected, concise explanation of what must be fixed
+- feedback: concise explanation of what must be fixed
 - diagnosis: technical root cause
-- results: array of per-criterion results
 
-No markdown fences. No extra text. Valid JSON only.
+No markdown fences, no extra text, valid JSON only.
 "#;
 
-pub const PROMPTER_REVISION_TEMPLATE: &str = r#"You are the Planner. The previous implementation failed evaluation. Produce a revised prompt.
+pub const PROMPTER_REVISION_TEMPLATE: &str = r#"You are the Planner. The previous implementation failed. Produce a revised prompt.
+
+Rules:
+1. Be fast — no new exploration, use the previous output to understand context
+2. No task tool
+3. Fix what the evaluation says is broken
 
 ---SPEC---
 {{spec}}
@@ -63,21 +59,14 @@ pub const PROMPTER_REVISION_TEMPLATE: &str = r#"You are the Planner. The previou
 {{eval_diagnosis}}
 ---END EVALUATION---
 
----CODER OUTPUT (last attempt)---
+---CODER OUTPUT---
 {{coder_output}}
 ---END CODER OUTPUT---
-
-Analyze why the implementation failed. Then produce a REVISED prompt and rubric.
-
-The revised prompt must:
-- Fix what went wrong (be specific about the failure)
-- Add missing constraints or clarifications
-- Keep what worked
 
 Output ONLY this JSON:
 {"prompt": "Goal: ...\n\nContext: ...\n\nPlan: ...\n\nRequirements:\n1. ...\n\nConstraints:\n- ...", "rubric": [{"criterion": "...", "description": "...", "weight": 3}], "analysis": "Brief explanation of what was wrong and how this revision fixes it."}
 
-No markdown fences. No extra text. Valid JSON only.
+No markdown fences, no extra text, valid JSON only.
 "#;
 
 pub fn render(template: &str, ctx: &std::collections::HashMap<&str, &str>) -> String {
@@ -146,6 +135,40 @@ pub fn tail(text: &str, max_bytes: usize) -> String {
         .rev()
         .collect();
     format!("[... truncated]\n{}", truncated)
+}
+
+pub fn sanitize_llm_json(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for ch in text.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                out.push(ch);
+            } else if ch == '\\' {
+                escaped = true;
+                out.push(ch);
+            } else if ch == '"' {
+                in_string = false;
+                out.push(ch);
+            } else if ch == '\n' || ch == '\r' {
+                out.push_str("\\n");
+            } else if ch == '\t' {
+                out.push_str("\\t");
+            } else if ch.is_control() {
+            } else {
+                out.push(ch);
+            }
+        } else {
+            if ch == '"' {
+                in_string = true;
+            }
+            out.push(ch);
+        }
+    }
+    out
 }
 
 pub fn extract_fenced_json(text: &str) -> Option<&str> {
