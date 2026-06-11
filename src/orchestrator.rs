@@ -15,6 +15,7 @@ pub async fn dispatch(cli: Cli, events: EventSink) -> Result<(), OrbitError> {
             let run_config = cli::resolve_config(&cli)?;
             run_simple_loop(run_config, events).await
         }
+        Command::Git { action } => crate::git::dispatch(action, events).await,
         Command::Acp { action } => match action {
             AcpAction::SetDefault { command } => {
                 let home = std::env::var("HOME").map_err(|_| OrbitError::Config("HOME not set".to_string()))?;

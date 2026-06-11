@@ -37,7 +37,9 @@ async fn main() -> anyhow::Result<()> {
             .as_ref()
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
-        orbit::cli::Command::Acp { .. } => std::env::current_dir().unwrap_or_default(),
+        orbit::cli::Command::Acp { .. } | orbit::cli::Command::Git { .. } => {
+            std::env::current_dir().unwrap_or_default()
+        }
     };
     let _guard = init_tracing(&target)?;
     let (events_tx, events_rx) = events::channel();

@@ -47,6 +47,9 @@ pub enum RunPhase {
     Coding,
     Evaluating,
     Done,
+    GitPlanning,
+    GitReviewing,
+    GitCommitting,
 }
 
 #[derive(Debug, Clone)]
@@ -86,3 +89,5 @@ impl Role {
         }
     }
 }
+
+

@@ -12,6 +12,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    #[command(about = "Run autonomous coding loop")]
     Run {
         #[arg(long, short)]
         spec: Option<String>,
@@ -35,9 +36,16 @@ pub enum Command {
         verbose: bool,
     },
 
+    #[command(about = "Manage ACP agent configuration")]
     Acp {
         #[command(subcommand)]
         action: AcpAction,
+    },
+
+    #[command(about = "AI-assisted git operations")]
+    Git {
+        #[command(subcommand)]
+        action: GitCliAction,
     },
 }
 
@@ -50,6 +58,15 @@ pub enum AcpAction {
 
     #[command(name = "handshake")]
     Handshake,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum GitCliAction {
+    #[command(about = "Analyze changes and create a commit (3-agent loop: plan → review → execute)")]
+    Commit {
+        #[arg(long, short, help = "Stage all changes before committing")]
+        all: bool,
+    },
 }
 
 pub fn resolve_config(cli: &Cli) -> anyhow::Result<RunConfig> {
@@ -214,6 +231,24 @@ mod tests {
         match &cli.command {
             Command::Acp { action } => assert!(matches!(action, AcpAction::Handshake)),
             _ => panic!("expected Acp"),
+        }
+    }
+
+    #[test]
+    fn test_git_commit_parses() {
+        let cli = Cli::parse_from(["orbit", "git", "commit"]);
+        match &cli.command {
+            Command::Git { action } => assert!(matches!(action, GitCliAction::Commit { all: false })),
+            _ => panic!("expected Git"),
+        }
+    }
+
+    #[test]
+    fn test_git_commit_all_parses() {
+        let cli = Cli::parse_from(["orbit", "git", "commit", "--all"]);
+        match &cli.command {
+            Command::Git { action } => assert!(matches!(action, GitCliAction::Commit { all: true })),
+            _ => panic!("expected Git"),
         }
     }
 }

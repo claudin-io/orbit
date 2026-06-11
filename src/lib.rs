@@ -2,6 +2,7 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod events;
+pub mod git;
 pub mod harness;
 pub mod orchestrator;
 pub mod prompts;

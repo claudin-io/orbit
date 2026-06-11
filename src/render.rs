@@ -3,14 +3,14 @@ use crate::types::RunPhase;
 use std::io::{IsTerminal, Write};
 use std::time::Instant;
 
-const RST: &str = "\x1b[0m";
-const BLD: &str = "\x1b[1m";
-const DIM: &str = "\x1b[2m";
-const RED: &str = "\x1b[31m";
-const GRN: &str = "\x1b[32m";
-const YLW: &str = "\x1b[33m";
-const CYN: &str = "\x1b[36m";
-const BWHT: &str = "\x1b[1;37m";
+pub const RST: &str = "\x1b[0m";
+pub const BLD: &str = "\x1b[1m";
+pub const DIM: &str = "\x1b[2m";
+pub const RED: &str = "\x1b[31m";
+pub const GRN: &str = "\x1b[32m";
+pub const YLW: &str = "\x1b[33m";
+pub const CYN: &str = "\x1b[36m";
+pub const BWHT: &str = "\x1b[1;37m";
 const SPINNER: &[char] = &['🌑', '🌒', '🌓', '🌔', '🌕', '🌖', '🌗', '🌘'];
 const GOLD: [u8; 10] = [172, 178, 184, 214, 220, 221, 222, 228, 221, 214];
 const BUF_MAX: usize = 5;
@@ -19,7 +19,7 @@ fn tty() -> bool {
     std::io::stdout().is_terminal()
 }
 
-fn c(s: &str, ansi: &str) -> String {
+pub fn c(s: &str, ansi: &str) -> String {
     if tty() {
         format!("{}{}{}", ansi, s, RST)
     } else {
@@ -211,12 +211,18 @@ impl Renderer {
                     RunPhase::Coding => "implementing",
                     RunPhase::Evaluating => "evaluating",
                     RunPhase::Done => "done",
+                    RunPhase::GitPlanning => "planning commit",
+                    RunPhase::GitReviewing => "reviewing plan",
+                    RunPhase::GitCommitting => "committing",
                 });
                 let label = match phase {
                     RunPhase::Prompting => "PROMPTING",
                     RunPhase::Coding => "CODING",
                     RunPhase::Evaluating => "EVALUATING",
                     RunPhase::Done => "DONE",
+                    RunPhase::GitPlanning => "GIT PLAN",
+                    RunPhase::GitReviewing => "GIT REVIEW",
+                    RunPhase::GitCommitting => "GIT COMMIT",
                 };
                 let _ = writeln!(std::io::stdout(), "{}", phase_sep(label));
             }
@@ -281,6 +287,9 @@ impl Renderer {
                 RunPhase::Coding => "CODING",
                 RunPhase::Evaluating => "EVALUATING",
                 RunPhase::Done => "DONE",
+                RunPhase::GitPlanning => "GIT PLAN",
+                RunPhase::GitReviewing => "GIT REVIEW",
+                RunPhase::GitCommitting => "GIT COMMIT",
             };
             let _ = writeln!(std::io::stdout(), "{}", phase_sep(label));
         } else {
