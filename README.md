@@ -1,291 +1,165 @@
 # Orbit
 
-**Orbit** is a Rust CLI that runs an autonomous coding loop. One binary, one loop, three ACP agents. Give it a spec, it prompts an AI to plan the implementation, codes it against your project, and evaluates the result. If the evaluator rejects the output, it retries with feedback. No human intervention mid-run, no TUI, no database, no state machine persistence. Just a prompt-eval loop over stdio JSON-RPC.
+**Orbit** is a Rust CLI that runs an autonomous coding loop. One binary, three commands, one ACP session. You give it a spec, it prompts an AI to plan, code, and evaluate — looping with feedback until the result passes or attempts run out. No daemon, no database, no state persistence.
 
-## Key idea
-
-> A spec in, working code out.
-
-Orbit is not a framework. It serializes a spec into a prompt, dispatches it through the Agent Client Protocol, and iterates until the evaluator approves or attempts run out. The entire state fits in a `for` loop.
+```
+orbit run --spec spec.md   # autonomous coding loop
+orbit acp handshake         # test ACP agent connectivity
+orbit git commit            # AI-assisted git commits
+```
 
 ## How it works
 
+A single `for` loop over ACP agent turns:
+
 ```
-User -> Orbit:      orbit run --spec spec.md
-Orbit -> Prompter:  read spec, produce implementation plan + evaluation rubric
-Orbit -> Coder:     implement the plan against the target project
-Orbit -> Evaluator: score result against rubric
-                      |
-         +------------+------------+
-         |                         |
-      approved                  rejected
-         |                         |
-      done                Prompter revises prompt
-                              with evaluator feedback
-                                    |
-                              Coder re-implements
-                                    |
-                              Evaluator re-checks
-                                    |
-                              (loop until approved
-                               or max_attempts hit)
+Prompter ──(plan + rubric)──→ Coder ──(output)──→ Evaluator
+   ↑                                                  │
+   │                                              approved?
+   │                                            yes│    │no
+   │                                                │    ↓
+   │←──── (feedback + diagnosis) ──────────────┘←──┘ Prompter revises
 ```
+
+Three roles, one loop. The Prompter produces a plan + weighted rubric, the Coder implements against the target project, and the Evaluator scores the result. If rejected, the Prompter revises with feedback and the cycle repeats.
 
 ## Simplicity
 
-Orbit is one binary (`orbit`), three subcommands, each a single ACP loop. Every design decision removes something so the remaining thing works well.
+Orbit is deliberately minimal. Every design decision removes something:
 
-- **One binary, three loops** — no daemon, no background process, no persistent state. You invoke `orbit run`, `orbit git commit`, or `orbit acp` — it runs a loop through ACP agents and exits. Process goes away, everything goes away.
-- **No TUI** — the renderer writes ANSI escape codes to stdout with no ncurses, no ratatui, no interactive widgets. A single `tokio::spawn` redraws a fixed number of lines. Killable, pipeable (`orbit run | tee log`), testable without a terminal.
-- **No resume, no checkpoint** — every run starts from scratch. State is a Rust struct on the stack. No crash recovery, no serialization, no migration.
+- **One binary, no daemon** — run it, it exits. No background process, no crash recovery, no checkpointing. State is a Rust struct on the stack.
+- **No TUI framework** — ANSI escape codes to stdout via a single `tokio::spawn`. Pipeable (`orbit run | tee log`), killable, testable without a terminal.
 - **No database, no cache** — no SQLite, no Redis, no file-based persistence. Nothing to corrupt, vacuum, or migrate.
-- **No test runner** — Orbit does not execute `cargo test` or `npm test`. Verification is delegated to the Evaluator ACP agent against a rubric.
-- **One ACP dependency** — `agent-client-protocol` v0.14 over subprocess stdio JSON-RPC. No HTTP server, no gRPC, no SDK wrapper.
-- **Version scheme** — `0.1.YYMMDD` from `build.rs`. No semantic versioning treadmill; the date tells you how fresh the build is.
-- **Same pattern, different task** — `orbit git commit` follows the identical `for`-loop pattern as `run`: Planner → Evaluator (loop with feedback) → Executor. No shared state, no new infrastructure.
+- **No test runner** — verification is delegated to the Evaluator ACP agent against a rubric. No `cargo test` or `npm test` integration.
+- **Same pattern, different task** — `orbit git commit` follows the identical loop: Planner → Evaluator (with revision) → Committer. No shared state, no new infrastructure.
+- **Version scheme** — `0.1.YYMMDD` from `build.rs`. The date tells you how fresh the build is.
 
 The complexity budget goes where it matters: JSON sanitization, rubric-based evaluation with weighted criteria, and retry with revision feedback.
 
-## Installation
-
-### Quick install
-
-```bash
-curl -sSfL -o /tmp/orbit "https://github.com/claudin-io/orbit/releases/latest/download/orbit-$(uname -s | tr '[:upper:]' '[:lower:]' | sed 's/darwin/arm64-macos/;s/linux/x86_64-linux/')" && chmod +x /tmp/orbit && mkdir -p ~/.local/bin && mv /tmp/orbit ~/.local/bin/orbit
-```
-
-> Make sure `~/.local/bin` is in your `PATH`. Add this to your shell profile (`~/.zshrc`, `~/.bashrc`):
-> ```bash
-> export PATH="$HOME/.local/bin:$PATH"
-> ```
-
-### Build from source
-
-```bash
-# Prerequisites: Rust toolchain (1.85+ for edition 2024)
-cargo install --path .
-```
-
 ## Usage
 
-### `orbit run` — start an autonomous coding loop
+### `orbit run` — autonomous coding loop
 
 ```bash
-# From a spec file
-orbit run --spec spec.md --target ./my-project
-
-# With an inline goal (writes to /tmp/orbit/spec-*.md)
-orbit run --goal "Add user authentication with JWT"
-
-# Opens $EDITOR to write your spec on the spot
-orbit run
-
-# Specify which ACP agent to use
-orbit run --spec spec.md --acp "opencode acp"
-
-# Set max attempts before giving up
-orbit run --spec spec.md --max-attempts 3
-
-# Enable verbose output
-orbit run -v --spec spec.md
+orbit run --spec spec.md                # from a spec file
+orbit run --goal "Add JWT auth"         # inline goal (writes /tmp/orbit/spec-*.md)
+orbit run                                # opens $EDITOR to write a spec
+orbit run --spec spec.md --acp "opencode acp"   # choose ACP agent
+orbit run --spec spec.md --max-attempts 3       # limit retries
+orbit run -v --spec spec.md                      # verbose output
 ```
-
-#### Flags
 
 | Flag | Description | Default |
 |---|---|---|
-| `--spec` / `-s` | Path to specification file | opens editor if missing |
-| `--goal` | Inline goal string (written to `/tmp/orbit/spec-*.md`) | — |
+| `--spec` / `-s` | Path to spec file | opens editor if missing |
+| `--goal` | Inline goal string | — |
 | `--target` | Target project directory | `.` |
-| `--config` | Path to a config file (loaded before `./orbit.toml`) | — |
-| `--acp` | ACP agent command (e.g. `"opencode acp"`) | `claude-code-acp` (falls back to `~/.orbit/config.toml` if set) |
-| `--max-attempts` | Max attempts before giving up | `5` |
-| `-v`, `--verbose` | Enable verbose output | `false` |
+| `--config` | Explicit config file path | — |
+| `--acp` | ACP agent command | `claude-code-acp` |
+| `--max-attempts` | Max eval-feedback loops | `5` |
+| `-v`, `--verbose` | Verbose output | `false` |
 
-### `orbit acp` — manage ACP agent configuration
-
-```bash
-# Save a default ACP command to ~/.orbit/config.toml
-orbit acp set-default "opencode acp"
-
-# Test ACP agent connectivity (uses the resolved default)
-orbit acp handshake
-```
-
-| Subcommand | Description |
-|---|---|
-| `set-default <cmd>` | Save default ACP agent command to `~/.orbit/config.toml` |
-| `handshake` | Test ACP agent connectivity |
-
-### `orbit git commit` — AI-assisted git commits
+### `orbit acp` — manage ACP agent
 
 ```bash
-# Analyze unstaged changes and commit
-orbit git commit
-
-# Stage everything and commit
-orbit git commit --all
-
-# Skip confirmation prompt
-orbit git commit -y
+orbit acp set-default "opencode acp"   # save default to ~/.orbit/config.toml
+orbit acp handshake                     # test connectivity
 ```
 
-`orbit git commit` runs a 3-agent loop to produce well-structured commits:
-
-```
-Orbit -> Planner:   read git status + diff, produce commit plan + rubric
-Orbit -> Evaluator: score plan against rubric
-                      |
-         +------------+------------+
-         |                         |
-      approved                  rejected
-         |                         |
-      done                Planner revises with
-                              evaluator feedback
-                              (loop until approved
-                               or max_attempts hit)
-         |
-Orbit -> Committer: execute `git add` + `git commit`
-```
-
-The same `for`-loop pattern as `orbit run`: Planner produces a plan and rubric, Evaluator scores it and may reject (triggering a revision), then the Committer executes. No TUI, no state, no database — just agent turns over stdio.
-
-#### Flags
-
-| Flag | Description | Default |
-|---|---|---|
-| `--all` / `-a` | Stage all changes before committing | `false` |
-| `-y` | Skip confirmation prompt | `false` |
-
-### Interactive spec editor
-
-When neither `--spec` nor `--goal` is provided — or when `--spec` points to a non-existent file — Orbit opens an editor so you can write your spec interactively. The editor is resolved in this order:
-
-1. `$ORBIT_EDITOR` — Orbit-specific override
-2. `$EDITOR` — standard Unix convention
-3. `$VISUAL` — fallback
-4. `nano` — default
+### `orbit git commit` — AI-assisted commits
 
 ```bash
-# Examples:
-export ORBIT_EDITOR="code -w"   # VS Code (use -w to wait)
-export ORBIT_EDITOR="vim"
-export ORBIT_EDITOR="nvim"
+orbit git commit          # analyze unstaged changes
+orbit git commit --all    # stage everything first
+orbit git commit -y       # skip confirmation
 ```
 
-Save and exit the editor; Orbit reads the content and proceeds normally.
+Runs Planner → Evaluator (loop) → Committer. The Planner reads git status + diff, proposes a commit structure, the Evaluator scores it (revisions if needed), then the Committer executes.
+
+## Supported ACP agents
+
+Orbit speaks [ACP (Agent Client Protocol)](https://opencode.ai/docs/acp/) over stdio JSON-RPC. Any ACP-compatible agent works:
+
+- [`claude-code-acp`](https://github.com/zed-industries/claude-code-acp)
+- [OpenCode ACP](https://opencode.ai/docs/acp/) (`opencode acp`)
+- Codex (`codex acp`)
+- Gemini CLI (`--experimental-acp`)
 
 ## Configuration
 
-### Project-level (`orbit.toml`)
+Resolution order (later overrides earlier):
 
-Place in your project root (or point with `--config`):
+1. Built-in defaults (`claude-code-acp`, 5 attempts, 1200s timeout)
+2. `~/.orbit/config.toml` — user-level ACP fallback
+3. `--config` path — explicit config file
+4. `./orbit.toml` — project-level config
+5. CLI flags — `--acp` and `--max-attempts` win everything
 
 ```toml
+# orbit.toml (project-level)
 [harness]
-command = "claude-code-acp"
-args = []
+command = "opencode"
+args = ["acp"]
 
 [loop]
 max_attempts = 5
 prompt_timeout_secs = 1200
 ```
 
-### User-level (`~/.orbit/config.toml`)
-
-Created by `orbit acp set-default`:
-
-```toml
-[harness]
-command = "opencode"
-args = ["acp"]
-```
-
-### Resolution order
-
-Sources are merged in this order (later sources override earlier ones):
-
-1. **Built-in defaults** — `claude-code-acp`, 5 attempts, 1200s timeout
-2. **`~/.orbit/config.toml`** — user-level ACP fallback (only applied when the harness command is still the built-in default)
-3. **`--config` path** — explicit config file via CLI flag
-4. **`./orbit.toml`** — project-level config in the target directory
-5. **CLI flags** — `--acp` and `--max-attempts` override everything
-
-Merging is field-by-field. A TOML file only overrides fields it explicitly sets; unspecified fields fall through to the next source. CLI flags always win.
-
 ## Architecture
 
-Runtime artifacts are written to `.orbit/` in the target project:
+### Session model
+
+ACP communication uses a persistent session (`HarnessSession` trait). The harness starts a session once, then routes multiple agent turns through it. No reconnect, no per-turn negotiation.
+
+### Runtime artifacts
+
+Written to `.orbit/` in the target project:
 
 ```
 .orbit/
-  debug/           # Per-run debug dumps (agent output on parse failure)
-  logs/            # Structured tracing logs per run
-  project-map.md   # Project structure map generated before the coding loop
-  state.json       # Current run state (phase, attempt, agent output)
-  summary.md       # Run summary (verdict, attempts, key events)
-  tests.md         # Test plan extracted from the evaluator rubric
-  lessons.md       # Lessons learned across runs (accumulated)
+  debug/         # Agent output dumps (on parse failure)
+  logs/          # Structured tracing logs
+  project-map.md # Project structure map
+  state.json     # Current run state
+  summary.md     # Run verdict and key events
+  tests.md       # Test plan from evaluator rubric
+  lessons.md     # Accumulated lessons across runs
 ```
 
-Source layout:
+### Source layout
 
 ```
-agents/
-  foundation.md        # Design foundation document (read by agents)
 src/
-  main.rs              # Entry point, tracing init, event channel
+  main.rs              # Entry point, tracing, renderer
   cli.rs               # CLI argument parsing (clap)
-  config.rs            # orbit.toml loading and merging
-  types.rs             # Core types (Role, PrompterOutput, EvalVerdict, RunPhase)
+  config.rs            # Config loading and merging
+  types.rs             # Core types (Role, PrompterOutput, EvalVerdict)
   error.rs             # Error types with exit codes
-  events.rs            # Event channel for headless renderer
-  git.rs               # Git commit 3-agent loop (planner, evaluator, committer)
-  lib.rs               # Module declarations
-  harness/
-    mod.rs             # Harness trait (run_turn)
-    acp.rs             # ACP protocol client (stdio JSON-RPC)
-    fake.rs            # Fake agent for hermetic testing
+  events.rs            # Event channel for renderer
+  orchestrator.rs      # Top-level loop (dispatch, run_simple_loop)
   prompts.rs           # Prompt templates with {{var}} rendering
-  orchestrator.rs      # Top-level orchestration (dispatch, run_simple_loop)
-  render.rs            # ANSI terminal renderer (headless — no TUI dependency)
-  tool_format.rs       # ACP tool call formatter for display
+  render.rs            # Headless ANSI renderer
+  tool_format.rs       # ACP tool call display formatter
+  git.rs               # Git commit 3-agent loop
+  harness/
+    mod.rs             # Harness + HarnessSession traits
+    acp.rs             # ACP stdio JSON-RPC client
+    fake.rs            # Fake harness for hermetic tests
+agents/
+  foundation.md        # Design foundation (agent context)
 ```
-
-## Supported ACP agents
-
-Orbit speaks **ACP (Agent Client Protocol)** over stdio JSON-RPC. Any ACP-compatible agent works:
-
-- [`claude-code-acp`](https://github.com/zed-industries/claude-code-acp)
-- [OpenCode ACP](https://opencode.ai/docs/acp/)
-- Codex (`codex acp`)
-- Gemini CLI (`--experimental-acp`)
 
 ## Development
 
 ```bash
-# Build
-cargo build
-
-# Run all tests
-cargo test
-
-# Run a specific test
-cargo test test_name
-
-# Lint
-cargo clippy -- -D warnings
-
-# Check formatting
-cargo fmt --check
-
-# Format
-cargo fmt
+cargo build                     # build
+cargo test                      # run all tests
+cargo clippy -- -D warnings     # lint
+cargo fmt                       # format
 ```
 
-### Testing
-
-Orbit uses the standard Rust test framework with inline tests (`#[cfg(test)] mod tests` in source files). The fake ACP harness enables hermetic orchestration tests without a real LLM. There are no integration tests — all tests are co-located with their source.
+Orbit uses the standard Rust test framework with `#[cfg(test)]` inline tests. The fake ACP harness enables hermetic orchestration tests without a real LLM. No integration test framework — all tests are co-located with their source.
 
 ## License
 
