@@ -90,24 +90,6 @@ pub async fn dispatch(action: &GitCliAction, events: EventSink) -> Result<(), Or
     }
 }
 
-fn confirm(message: &str, default: bool) -> bool {
-    let prompt = if default { "[Y/n]" } else { "[y/N]" };
-    eprint!(
-        "  {} {} {} ",
-        render::c("?", render::YLW),
-        render::c(message, render::BLD),
-        render::c(prompt, render::DIM)
-    );
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input).ok();
-    let input = input.trim().to_lowercase();
-    match input.as_str() {
-        "y" | "yes" => true,
-        "n" | "no" => false,
-        _ => default,
-    }
-}
-
 async fn run_git_commit_loop(all: bool, yes: bool, events: EventSink) -> Result<(), OrbitError> {
     let target = std::env::current_dir().map_err(OrbitError::Io)?;
     let mut config = config::load(None, &target);
@@ -228,7 +210,13 @@ async fn run_git_commit_loop(all: bool, yes: bool, events: EventSink) -> Result<
         }
 
         if !yes {
-            let confirmed = confirm("Proceed with this commit?", true);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let _ = events.send(OrbitEvent::ConfirmRequest {
+                message: "Proceed with this commit?".to_string(),
+                default: true,
+                tx,
+            });
+            let confirmed = rx.await.unwrap_or(true);
             if !confirmed {
                 let _ = writeln!(
                     std::io::stdout(),

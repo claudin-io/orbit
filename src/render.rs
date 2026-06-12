@@ -155,6 +155,28 @@ impl Renderer {
     }
 
     pub fn handle(&mut self, event: OrbitEvent) {
+        if let OrbitEvent::ConfirmRequest { message, default, tx } = event {
+            let prompt = if default { "[Y/n]" } else { "[y/N]" };
+            let _ = write!(
+                std::io::stdout(),
+                "  {} {} {} ",
+                c("?", YLW),
+                c(&message, BLD),
+                c(prompt, DIM)
+            );
+            let _ = std::io::stdout().flush();
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input).ok();
+            let input = input.trim().to_lowercase();
+            let confirmed = match input.as_str() {
+                "y" | "yes" => true,
+                "n" | "no" => false,
+                _ => default,
+            };
+            let _ = tx.send(confirmed);
+            return;
+        }
+
         if self.verbose {
             self.handle_verbose(event);
             return;

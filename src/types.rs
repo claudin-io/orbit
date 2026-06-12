@@ -21,6 +21,7 @@ pub struct EvalCriterionResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RubricItem {
+    #[serde(default)]
     pub criterion: String,
     #[serde(default)]
     pub description: String,
@@ -53,7 +54,7 @@ pub enum RunPhase {
     GitWorktree,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum OrbitEvent {
     PhaseChanged(RunPhase),
     RunStarted { spec_path: String, target: String },
@@ -66,6 +67,26 @@ pub enum OrbitEvent {
     EvalVerdict { approved: bool, feedback: String, diagnosis: String, results: Vec<EvalCriterionResult> },
     RunFinished { exit_code: i32 },
     RunFailed { reason: String },
+    ConfirmRequest { message: String, default: bool, tx: tokio::sync::oneshot::Sender<bool> },
+}
+
+impl Clone for OrbitEvent {
+    fn clone(&self) -> Self {
+        match self {
+            Self::ConfirmRequest { .. } => panic!("ConfirmRequest cannot be cloned"),
+            Self::PhaseChanged(v) => Self::PhaseChanged(v.clone()),
+            Self::RunStarted { spec_path, target } => Self::RunStarted { spec_path: spec_path.clone(), target: target.clone() },
+            Self::AgentChunk(v) => Self::AgentChunk(v.clone()),
+            Self::TaskMessage { task_id, message } => Self::TaskMessage { task_id: task_id.clone(), message: message.clone() },
+            Self::ToolCall { name, params, raw_input } => Self::ToolCall { name: name.clone(), params: params.clone(), raw_input: raw_input.clone() },
+            Self::PromptCreated { prompt_summary, rubric } => Self::PromptCreated { prompt_summary: prompt_summary.clone(), rubric: rubric.clone() },
+            Self::AttemptStarted { attempt, max_attempts } => Self::AttemptStarted { attempt: *attempt, max_attempts: *max_attempts },
+            Self::CoderOutput { summary } => Self::CoderOutput { summary: summary.clone() },
+            Self::EvalVerdict { approved, feedback, diagnosis, results } => Self::EvalVerdict { approved: *approved, feedback: feedback.clone(), diagnosis: diagnosis.clone(), results: results.clone() },
+            Self::RunFinished { exit_code } => Self::RunFinished { exit_code: *exit_code },
+            Self::RunFailed { reason } => Self::RunFailed { reason: reason.clone() },
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

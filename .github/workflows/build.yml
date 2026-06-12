@@ -22,7 +22,7 @@ jobs:
       - name: Get version
         if: github.event_name != 'push'
         id: version
-        run: echo "version=$(./target/release/orbit --version 2>&1 | grep -oP '\d+\.\d+\.\d+')" >> $GITHUB_OUTPUT
+        run: echo "version=$(./target/release/orbit --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')" >> $GITHUB_OUTPUT
 
       - name: Rename binary
         if: github.event_name != 'push'
@@ -51,7 +51,7 @@ jobs:
 
       - name: Get version
         id: version
-        run: echo "version=$(./target/release/orbit --version 2>&1 | grep -oP '\d+\.\d+\.\d+')" >> $GITHUB_OUTPUT
+        run: echo "version=$(./target/release/orbit --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')" >> $GITHUB_OUTPUT
 
       - name: Rename binary
         run: mv target/release/orbit target/release/orbit-arm64-macos
