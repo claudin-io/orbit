@@ -70,6 +70,33 @@ pub enum GitCliAction {
         #[arg(long, short = 'y', help = "Skip confirmation prompt")]
         yes: bool,
     },
+
+    #[command(about = "Manage git worktrees")]
+    Worktree {
+        #[command(subcommand)]
+        action: WorktreeAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WorktreeAction {
+    #[command(about = "List all worktrees")]
+    List,
+
+    #[command(about = "Add a new worktree")]
+    Add {
+        #[arg(help = "Path for the new worktree")]
+        path: String,
+
+        #[arg(long, short, help = "Branch to checkout in the new worktree")]
+        branch: Option<String>,
+    },
+
+    #[command(about = "Remove a worktree")]
+    Remove {
+        #[arg(help = "Path of the worktree to remove")]
+        path: String,
+    },
 }
 
 pub fn resolve_config(cli: &Cli) -> anyhow::Result<RunConfig> {
@@ -260,6 +287,48 @@ mod tests {
         let cli = Cli::parse_from(["orbit", "git", "commit", "-y"]);
         match &cli.command {
             Command::Git { action } => assert!(matches!(action, GitCliAction::Commit { yes: true, .. })),
+            _ => panic!("expected Git"),
+        }
+    }
+
+    #[test]
+    fn test_git_worktree_list_parses() {
+        let cli = Cli::parse_from(["orbit", "git", "worktree", "list"]);
+        match &cli.command {
+            Command::Git { action } => assert!(matches!(action, GitCliAction::Worktree { action: WorktreeAction::List })),
+            _ => panic!("expected Git"),
+        }
+    }
+
+    #[test]
+    fn test_git_worktree_add_parses() {
+        let cli = Cli::parse_from(["orbit", "git", "worktree", "add", "../hotfix"]);
+        match &cli.command {
+            Command::Git { action } => {
+                assert!(matches!(action, GitCliAction::Worktree { action: WorktreeAction::Add { path, branch: None } } if path == "../hotfix"));
+            }
+            _ => panic!("expected Git"),
+        }
+    }
+
+    #[test]
+    fn test_git_worktree_add_with_branch_parses() {
+        let cli = Cli::parse_from(["orbit", "git", "worktree", "add", "-b", "fix/api", "../fix"]);
+        match &cli.command {
+            Command::Git { action } => {
+                assert!(matches!(action, GitCliAction::Worktree { action: WorktreeAction::Add { path, branch: Some(b) } } if path == "../fix" && b == "fix/api"));
+            }
+            _ => panic!("expected Git"),
+        }
+    }
+
+    #[test]
+    fn test_git_worktree_remove_parses() {
+        let cli = Cli::parse_from(["orbit", "git", "worktree", "remove", "../hotfix"]);
+        match &cli.command {
+            Command::Git { action } => {
+                assert!(matches!(action, GitCliAction::Worktree { action: WorktreeAction::Remove { path } } if path == "../hotfix"));
+            }
             _ => panic!("expected Git"),
         }
     }

@@ -50,6 +50,7 @@ pub enum RunPhase {
     GitPlanning,
     GitReviewing,
     GitCommitting,
+    GitWorktree,
 }
 
 #[derive(Debug, Clone)]

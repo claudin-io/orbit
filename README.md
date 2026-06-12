@@ -76,6 +76,17 @@ orbit git commit -y       # skip confirmation
 
 Runs Planner → Evaluator (loop) → Committer. The Planner reads git status + diff, proposes a commit structure, the Evaluator scores it (revisions if needed), then the Committer executes.
 
+### `orbit git worktree` — manage git worktrees
+
+```bash
+orbit git worktree list            # list all worktrees
+orbit git worktree add ../hotfix    # create worktree at ../hotfix on current branch
+orbit git worktree add -b fix/api ../fix   # create worktree with new branch
+orbit git worktree remove ../hotfix # remove a worktree (with confirmation)
+```
+
+Direct `git worktree` wrappers with orbit's colored output. No AI agent — just shell commands with consistent formatting.
+
 ## Supported ACP agents
 
 Orbit speaks [ACP (Agent Client Protocol)](https://opencode.ai/docs/acp/) over stdio JSON-RPC. Any ACP-compatible agent works:
@@ -142,6 +153,7 @@ src/
   render.rs            # Headless ANSI renderer
   tool_format.rs       # ACP tool call display formatter
   git.rs               # Git commit 3-agent loop
+  git_worktree.rs      # Git worktree commands (list/add/remove)
   harness/
     mod.rs             # Harness + HarnessSession traits
     acp.rs             # ACP stdio JSON-RPC client

@@ -3,6 +3,7 @@ pub mod config;
 pub mod error;
 pub mod events;
 pub mod git;
+pub mod git_worktree;
 pub mod harness;
 pub mod orchestrator;
 pub mod prompts;

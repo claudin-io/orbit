@@ -80,6 +80,13 @@ Output ONLY this JSON:
 pub async fn dispatch(action: &GitCliAction, events: EventSink) -> Result<(), OrbitError> {
     match action {
         GitCliAction::Commit { all, yes } => run_git_commit_loop(*all, *yes, events).await,
+        GitCliAction::Worktree { action } => {
+            emit!(events, OrbitEvent::PhaseChanged(RunPhase::GitWorktree));
+            let result = crate::git_worktree::dispatch(action);
+            emit!(events, OrbitEvent::PhaseChanged(RunPhase::Done));
+            emit!(events, OrbitEvent::RunFinished { exit_code: if result.is_ok() { 0 } else { 1 } });
+            result
+        }
     }
 }
 
@@ -253,7 +260,7 @@ async fn run_git_commit_loop(all: bool, yes: bool, events: EventSink) -> Result<
             std::io::stdout(),
             "  {} {}",
             render::c("●", render::GRN),
-            render::c(&outcome.full_text.trim(), render::DIM)
+            render::c(outcome.full_text.trim(), render::DIM)
         );
 
         emit!(events, OrbitEvent::PhaseChanged(RunPhase::Done));

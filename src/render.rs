@@ -214,6 +214,7 @@ impl Renderer {
                     RunPhase::GitPlanning => "planning commit",
                     RunPhase::GitReviewing => "reviewing plan",
                     RunPhase::GitCommitting => "committing",
+                    RunPhase::GitWorktree => "worktree",
                 });
                 let label = match phase {
                     RunPhase::Prompting => "PROMPTING",
@@ -223,6 +224,7 @@ impl Renderer {
                     RunPhase::GitPlanning => "GIT PLAN",
                     RunPhase::GitReviewing => "GIT REVIEW",
                     RunPhase::GitCommitting => "GIT COMMIT",
+                    RunPhase::GitWorktree => "GIT WORKTREE",
                 };
                 let _ = writeln!(std::io::stdout(), "{}", phase_sep(label));
             }
@@ -290,6 +292,7 @@ impl Renderer {
                 RunPhase::GitPlanning => "GIT PLAN",
                 RunPhase::GitReviewing => "GIT REVIEW",
                 RunPhase::GitCommitting => "GIT COMMIT",
+                RunPhase::GitWorktree => "GIT WORKTREE",
             };
             let _ = writeln!(std::io::stdout(), "{}", phase_sep(label));
         } else {
