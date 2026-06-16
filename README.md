@@ -16,7 +16,9 @@ binary, and drops it in `/usr/local/bin`:
 ```bash
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) asset=orbit-arm64-macos ;;
+  Darwin-x86_64) asset=orbit-x86_64-macos ;;
   Linux-x86_64) asset=orbit-x86_64-linux ;;
+  Linux-aarch64) asset=orbit-aarch64-linux ;;
   *) echo "Unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
 esac
 curl -fsSL "https://github.com/claudin-io/orbit/releases/latest/download/$asset" -o orbit && chmod +x orbit && sudo mv orbit /usr/local/bin/orbit
@@ -34,15 +36,27 @@ these assets:
 | Platform | Asset |
 |---|---|
 | macOS (Apple Silicon) | `orbit-arm64-macos` |
+| macOS (Intel) | `orbit-x86_64-macos` |
 | Linux (x86_64) | `orbit-x86_64-linux` |
+| Linux (ARM64) | `orbit-aarch64-linux` |
+| Windows (x86_64) | `orbit-x86_64-windows.exe` |
 
 ```bash
-# macOS (arm64)
+# macOS (Apple Silicon)
 curl -fsSL https://github.com/claudin-io/orbit/releases/latest/download/orbit-arm64-macos -o orbit && chmod +x orbit && sudo mv orbit /usr/local/bin/orbit
+
+# macOS (Intel)
+curl -fsSL https://github.com/claudin-io/orbit/releases/latest/download/orbit-x86_64-macos -o orbit && chmod +x orbit && sudo mv orbit /usr/local/bin/orbit
 
 # Linux (x86_64)
 curl -fsSL https://github.com/claudin-io/orbit/releases/latest/download/orbit-x86_64-linux -o orbit && chmod +x orbit && sudo mv orbit /usr/local/bin/orbit
+
+# Linux (ARM64)
+curl -fsSL https://github.com/claudin-io/orbit/releases/latest/download/orbit-aarch64-linux -o orbit && chmod +x orbit && sudo mv orbit /usr/local/bin/orbit
 ```
+
+The Linux binaries are statically linked (musl), so they run on any
+distribution regardless of the system glibc version.
 
 Building from source instead? See [Development](#development).
 
