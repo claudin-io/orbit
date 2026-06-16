@@ -186,8 +186,12 @@ impl Renderer {
             return;
         }
 
-        if let OrbitEvent::ModelInfo { model } = event {
-            let _ = writeln!(std::io::stdout(), "  {} {}", c("🧠", DIM), c(&format!("Model: {}", model), CYN));
+        if let OrbitEvent::ModelInfo { tool, model } = event {
+            let line = match model {
+                Some(m) => format!("{} {} | {} {}", c("🧰", DIM), tool, c("🧠", DIM), c(&m, CYN)),
+                None => format!("{} {}", c("🧰", DIM), tool),
+            };
+            let _ = writeln!(std::io::stdout(), "  {}", line);
             return;
         }
 

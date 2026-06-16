@@ -154,11 +154,6 @@ async fn pump_turn(
 
         match v.get("type").and_then(|t| t.as_str()) {
             Some("assistant") => handle_assistant(&v, events, cwd, &mut line_buf, &mut output),
-            Some("init") => {
-                if let Some(model) = v.get("model").and_then(|m| m.as_str()).map(|s| s.to_string()) {
-                    send_event(events, OrbitEvent::ModelInfo { model });
-                }
-            }
             Some("result") => {
                 let remaining = line_buf.trim();
                 if !remaining.is_empty() {

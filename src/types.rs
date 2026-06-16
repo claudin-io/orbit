@@ -70,7 +70,7 @@ pub enum OrbitEvent {
     ConfirmRequest { message: String, default: bool, tx: tokio::sync::oneshot::Sender<bool> },
     PromptInput { message: String, tx: tokio::sync::oneshot::Sender<String> },
     Notice { message: String },
-    ModelInfo { model: String },
+    ModelInfo { tool: String, model: Option<String> },
 }
 
 impl Clone for OrbitEvent {
@@ -79,7 +79,7 @@ impl Clone for OrbitEvent {
             Self::ConfirmRequest { .. } => panic!("ConfirmRequest cannot be cloned"),
             Self::PromptInput { .. } => panic!("PromptInput cannot be cloned"),
             Self::Notice { message } => Self::Notice { message: message.clone() },
-            Self::ModelInfo { model } => Self::ModelInfo { model: model.clone() },
+            Self::ModelInfo { tool, model } => Self::ModelInfo { tool: tool.clone(), model: model.clone() },
             Self::PhaseChanged(v) => Self::PhaseChanged(v.clone()),
             Self::RunStarted { spec_path, target } => Self::RunStarted { spec_path: spec_path.clone(), target: target.clone() },
             Self::AgentChunk(v) => Self::AgentChunk(v.clone()),

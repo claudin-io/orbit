@@ -163,11 +163,11 @@ impl SessionRouter {
         let key = self.key_for_role(role);
 
         if !self.sessions.contains_key(&key) {
-            // Emit model info before starting the session so the user sees which
-            // harness is about to be used. The harness itself may override this
-            // later with a more precise model name (e.g. ACP config_options).
+            // Show which harness is about to start. The harness itself may
+            // emit ModelInfo with a model name later (e.g. ACP config_options).
             let _ = self.events.send(OrbitEvent::ModelInfo {
-                model: hc.to_command_line(),
+                tool: hc.to_command_line(),
+                model: None,
             });
 
             let harness = make_harness(

@@ -359,7 +359,10 @@ fn spawn_session_task(
                         .block_task()
                         .run_until(async move |mut session| {
                             if let Some(model) = extract_model(&session.response().config_options) {
-                                send_event(&events, OrbitEvent::ModelInfo { model });
+                                send_event(&events, OrbitEvent::ModelInfo {
+                                    tool: cmd_str.clone(),
+                                    model: Some(model),
+                                });
                             }
                             while let Some(cmd) = cmd_rx.recv().await {
                                 match cmd {
@@ -583,7 +586,10 @@ impl AcpHarness {
                             let cwd = cwd.clone();
                             async move |mut session| {
                                 if let Some(model) = extract_model(&session.response().config_options) {
-                                    send_event(&events, OrbitEvent::ModelInfo { model });
+                                    send_event(&events, OrbitEvent::ModelInfo {
+                                        tool: self.cmd_str(),
+                                        model: Some(model),
+                                    });
                                 }
                                 Self::run_turn_in_session(
                                     &mut session, &prompt, &events, &cwd, Some(&subagent),
