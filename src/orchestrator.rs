@@ -3,10 +3,9 @@ use crate::cli::Cli;
 use crate::config;
 use crate::error::OrbitError;
 use crate::events::{EventSink, emit};
-use crate::harness::{HarnessSession, SessionRouter};
+use crate::harness::SessionRouter;
 use crate::prompts::{EVALUATOR_TEMPLATE, PROMPTER_REVISION_TEMPLATE, PROMPTER_TEMPLATE, extract_fenced_json, render, sanitize_llm_json};
-use crate::types::{EvalVerdict, OrbitEvent, PrompterOutput, Role, RunPhase};
-use std::collections::HashMap;
+use crate::types::{EvalVerdict, OrbitEvent, PrompterOutput, Role, RunPhase, TurnOutcome};
 
 pub async fn dispatch(cli: Cli, events: EventSink) -> Result<(), OrbitError> {
     match &cli.command {
@@ -112,8 +111,13 @@ async fn run_simple_loop(run_config: config::RunConfig, events: EventSink) -> Re
     emit!(events, OrbitEvent::PhaseChanged(RunPhase::Prompting));
 
     let prompter_output = {
-        let session = router.session_for(Role::Prompter).await?;
-        run_prompter(session, &spec_content).await?
+        let mut ctx = std::collections::HashMap::new();
+        ctx.insert("spec", &spec_content[..]);
+        let prompt = render(PROMPTER_TEMPLATE, &ctx);
+        tracing::debug!(role = ?Role::Prompter, prompt_len = prompt.len(), prompt = %prompt, "sending prompt");
+        let outcome = run_turn_or_fallback(&mut router, Role::Prompter, prompt, events.clone()).await?;
+        tracing::debug!(role = ?Role::Prompter, output_len = outcome.full_text.len(), output = %outcome.full_text, "agent output");
+        parse_prompter_output(&outcome.full_text)?
     };
     let prompt_summary = extract_goal(&prompter_output.prompt);
     tracing::debug!(
@@ -144,10 +148,8 @@ async fn run_simple_loop(run_config: config::RunConfig, events: EventSink) -> Re
         );
 
         tracing::debug!(role = ?Role::Coder, attempt, prompt_len = prompt.len(), prompt = %prompt, "sending prompt");
-        let coder_outcome = {
-            let session = router.session_for(Role::Coder).await?;
-            session.run_turn(Role::Coder, prompt.clone()).await?
-        };
+        let coder_outcome =
+            run_turn_or_fallback(&mut router, Role::Coder, prompt.clone(), events.clone()).await?;
         let coder_text = coder_outcome.full_text;
         tracing::debug!(role = ?Role::Coder, attempt, output_len = coder_text.len(), output = %coder_text, "agent output");
 
@@ -159,8 +161,15 @@ async fn run_simple_loop(run_config: config::RunConfig, events: EventSink) -> Re
         emit!(events, OrbitEvent::PhaseChanged(RunPhase::Evaluating));
 
         let eval_outcome = {
-            let session = router.session_for(Role::Evaluator).await?;
-            run_evaluator(session, &spec_content, &rubric_text, &coder_text).await?
+            let mut ctx = std::collections::HashMap::new();
+            ctx.insert("spec", &spec_content[..]);
+            ctx.insert("rubric", &rubric_text);
+            ctx.insert("coder_output", &coder_text);
+            let prompt = render(EVALUATOR_TEMPLATE, &ctx);
+            tracing::debug!(role = ?Role::Evaluator, prompt_len = prompt.len(), prompt = %prompt, "sending prompt");
+            let outcome = run_turn_or_fallback(&mut router, Role::Evaluator, prompt, events.clone()).await?;
+            tracing::debug!(role = ?Role::Evaluator, output_len = outcome.full_text.len(), output = %outcome.full_text, "agent output");
+            parse_eval_verdict(&outcome.full_text)?
         };
         let results = eval_outcome.results.clone();
 
@@ -192,15 +201,23 @@ async fn run_simple_loop(run_config: config::RunConfig, events: EventSink) -> Re
 
         if attempt < max_attempts {
             emit!(events, OrbitEvent::PhaseChanged(RunPhase::Prompting));
-            let session = router.session_for(Role::Prompter).await?;
-            prompt = run_prompter_revision(
-                session,
-                &spec_content,
-                &coder_text,
-                &eval_outcome.feedback,
-                &eval_outcome.diagnosis,
-            )
-            .await?;
+            let mut ctx = std::collections::HashMap::new();
+            ctx.insert("spec", &spec_content[..]);
+            ctx.insert("coder_output", &coder_text);
+            ctx.insert("eval_feedback", &eval_outcome.feedback);
+            ctx.insert("eval_diagnosis", &eval_outcome.diagnosis);
+            let revision_prompt = render(PROMPTER_REVISION_TEMPLATE, &ctx);
+            tracing::debug!(
+                role = ?Role::Prompter,
+                prompt_len = revision_prompt.len(),
+                eval_feedback = eval_outcome.feedback,
+                eval_diagnosis = eval_outcome.diagnosis,
+                "sending prompt (revision)"
+            );
+            let outcome = run_turn_or_fallback(&mut router, Role::Prompter, revision_prompt, events.clone()).await?;
+            tracing::debug!(role = ?Role::Prompter, output_len = outcome.full_text.len(), output = %outcome.full_text, "agent output");
+            let parsed = parse_prompter_output(&outcome.full_text)?;
+            prompt = parsed.prompt;
         }
     }
 
@@ -211,6 +228,46 @@ async fn run_simple_loop(run_config: config::RunConfig, events: EventSink) -> Re
     );
     emit!(events, OrbitEvent::RunFailed { reason: reason.clone() });
     Err(OrbitError::Exhausted(reason))
+}
+
+/// Run a turn, handling [`OrbitError::SessionLimit`] by warning the user and
+/// offering to switch to the fallback harness. Retries once on confirmation.
+async fn run_turn_or_fallback(
+    router: &mut SessionRouter,
+    role: Role,
+    prompt: String,
+    events: EventSink,
+) -> Result<TurnOutcome, OrbitError> {
+    let session = router.session_for(role).await?;
+    match session.run_turn(role, prompt.clone()).await {
+        Ok(outcome) => Ok(outcome),
+        Err(OrbitError::SessionLimit(detail)) => {
+            emit!(events, OrbitEvent::Notice {
+                message: format!("⚠ Session limit reached: {detail}"),
+            });
+
+            let (confirm_tx, confirm_rx) = tokio::sync::oneshot::channel();
+            let confirm_event = OrbitEvent::ConfirmRequest {
+                message: "Session limit hit. Switch to fallback harness and retry?".to_string(),
+                default: true,
+                tx: confirm_tx,
+            };
+            let _ = events.send(confirm_event);
+            let confirmed = confirm_rx.await.unwrap_or(true);
+
+            if confirmed {
+                router.fallback_for(role)?;
+                emit!(events, OrbitEvent::Notice {
+                    message: "Switched to fallback harness. Retrying turn...".to_string(),
+                });
+                let session = router.session_for(role).await?;
+                session.run_turn(role, prompt).await
+            } else {
+                Err(OrbitError::SessionLimit(detail))
+            }
+        }
+        Err(e) => Err(e),
+    }
 }
 
 fn summarize_coder_output(text: &str) -> String {
@@ -240,63 +297,6 @@ fn summarize_coder_output(text: &str) -> String {
     } else {
         summary_parts.join(", ")
     }
-}
-
-async fn run_prompter(
-    session: &mut dyn HarnessSession,
-    spec: &str,
-) -> Result<PrompterOutput, OrbitError> {
-    let mut ctx = HashMap::new();
-    ctx.insert("spec", spec);
-    let prompt = render(PROMPTER_TEMPLATE, &ctx);
-    tracing::debug!(role = ?Role::Prompter, prompt_len = prompt.len(), prompt = %prompt, "sending prompt");
-    let outcome = session.run_turn(Role::Prompter, prompt).await?;
-    tracing::debug!(role = ?Role::Prompter, output_len = outcome.full_text.len(), output = %outcome.full_text, "agent output");
-    parse_prompter_output(&outcome.full_text)
-}
-
-async fn run_prompter_revision(
-    session: &mut dyn HarnessSession,
-    spec: &str,
-    coder_output: &str,
-    eval_feedback: &str,
-    eval_diagnosis: &str,
-) -> Result<String, OrbitError> {
-    let mut ctx = HashMap::new();
-    ctx.insert("spec", spec);
-    ctx.insert("coder_output", coder_output);
-    ctx.insert("eval_feedback", eval_feedback);
-    ctx.insert("eval_diagnosis", eval_diagnosis);
-    let prompt = render(PROMPTER_REVISION_TEMPLATE, &ctx);
-    tracing::debug!(
-        role = ?Role::Prompter,
-        prompt_len = prompt.len(),
-        eval_feedback,
-        eval_diagnosis,
-        prompt = %prompt,
-        "sending prompt (revision)"
-    );
-    let outcome = session.run_turn(Role::Prompter, prompt).await?;
-    tracing::debug!(role = ?Role::Prompter, output_len = outcome.full_text.len(), output = %outcome.full_text, "agent output");
-    let parsed = parse_prompter_output(&outcome.full_text)?;
-    Ok(parsed.prompt)
-}
-
-async fn run_evaluator(
-    session: &mut dyn HarnessSession,
-    spec: &str,
-    rubric: &str,
-    coder_output: &str,
-) -> Result<EvalVerdict, OrbitError> {
-    let mut ctx = HashMap::new();
-    ctx.insert("spec", spec);
-    ctx.insert("rubric", rubric);
-    ctx.insert("coder_output", coder_output);
-    let prompt = render(EVALUATOR_TEMPLATE, &ctx);
-    tracing::debug!(role = ?Role::Evaluator, prompt_len = prompt.len(), prompt = %prompt, "sending prompt");
-    let outcome = session.run_turn(Role::Evaluator, prompt).await?;
-    tracing::debug!(role = ?Role::Evaluator, output_len = outcome.full_text.len(), output = %outcome.full_text, "agent output");
-    parse_eval_verdict(&outcome.full_text)
 }
 
 fn dump_debug_agent_output(text: &str, label: &str) {
@@ -377,9 +377,6 @@ fn parse_eval_verdict(text: &str) -> Result<EvalVerdict, OrbitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events;
-    use crate::harness::fake::FakeHarness;
-    use crate::harness::Harness;
 
     #[test]
     fn test_parse_prompter_output_valid() {
@@ -448,21 +445,4 @@ mod tests {
         assert_eq!(extract_goal(prompt), "See prompt for details");
     }
 
-    #[tokio::test]
-    async fn test_run_prompter_with_fake_harness() {
-        let harness = FakeHarness;
-        let (tx, _rx) = events::channel();
-        let mut session = harness.start_session(tx).await.unwrap();
-        let result = run_prompter(&mut session, "do something").await;
-        assert!(result.is_err(), "fake harness returns empty text, should fail to parse");
-    }
-
-    #[tokio::test]
-    async fn test_run_evaluator_with_fake_harness() {
-        let harness = FakeHarness;
-        let (tx, _rx) = events::channel();
-        let mut session = harness.start_session(tx).await.unwrap();
-        let result = run_evaluator(&mut session, "spec", "rubric", "output").await;
-        assert!(result.is_err(), "fake harness returns empty text, should fail to parse");
-    }
 }

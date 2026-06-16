@@ -17,6 +17,9 @@ pub enum OrbitError {
     #[error("All attempts exhausted: {0}")]
     Exhausted(String),
 
+    #[error("Session limit reached: {0}")]
+    SessionLimit(String),
+
     #[error("{0}")]
     Other(String),
 }
@@ -27,6 +30,7 @@ impl OrbitError {
             Self::Config(_) | Self::Parse(_) => 2,
             Self::Io(_) | Self::Acp(_) => 2,
             Self::Exhausted(_) => 1,
+            Self::SessionLimit(_) => 2,
             Self::Other(_) => 2,
         }
     }

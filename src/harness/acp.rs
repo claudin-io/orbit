@@ -6,7 +6,8 @@ use crate::tool_format;
 use agent_client_protocol::role::acp::Client;
 use agent_client_protocol::schema::{
     ContentBlock, InitializeRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification, SessionUpdate, ToolCallStatus,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigKind, SessionNotification, SessionUpdate, ToolCallStatus,
 };
 use agent_client_protocol::util::MatchDispatch;
 use agent_client_protocol::AcpAgent;
@@ -104,6 +105,15 @@ async fn spawn_subagent_task(config: &SubagentConfig, task_prompt: &str) -> Resu
         ))
     })?
     .map_err(|e: agent_client_protocol::Error| OrbitError::Acp(e.to_string()))
+}
+
+fn extract_model(config_options: &Option<Vec<SessionConfigOption>>) -> Option<String> {
+    let opts = config_options.as_ref()?;
+    let model_opt = opts.iter().find(|o| o.category.as_ref() == Some(&SessionConfigOptionCategory::Model))?;
+    match &model_opt.kind {
+        SessionConfigKind::Select(sel) => Some(sel.current_value.to_string()),
+        _ => None,
+    }
 }
 
 fn auto_approve(request: &RequestPermissionRequest) -> RequestPermissionOutcome {
@@ -348,6 +358,9 @@ fn spawn_session_task(
                         .build_session(&cwd)
                         .block_task()
                         .run_until(async move |mut session| {
+                            if let Some(model) = extract_model(&session.response().config_options) {
+                                send_event(&events, OrbitEvent::ModelInfo { model });
+                            }
                             while let Some(cmd) = cmd_rx.recv().await {
                                 match cmd {
                                     SessionCommand::RunTurn { prompt, result } => {
@@ -569,6 +582,9 @@ impl AcpHarness {
                             let events = events.clone();
                             let cwd = cwd.clone();
                             async move |mut session| {
+                                if let Some(model) = extract_model(&session.response().config_options) {
+                                    send_event(&events, OrbitEvent::ModelInfo { model });
+                                }
                                 Self::run_turn_in_session(
                                     &mut session, &prompt, &events, &cwd, Some(&subagent),
                                 )

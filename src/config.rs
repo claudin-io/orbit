@@ -6,6 +6,7 @@ pub struct Config {
     pub harness: HarnessConfig,
     pub steps: StepsConfig,
     pub r#loop: LoopConfig,
+    pub fallback: Option<HarnessConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +169,11 @@ pub fn apply_orbit_config(cfg: &mut Config, contents: &str) {
             "acp_retry_base_delay_ms" => {
                 if let Ok(n) = rest.parse() {
                     cfg.r#loop.acp_retry_base_delay_ms = n;
+                }
+            }
+            "fallback" => {
+                if let Some(h) = HarnessConfig::parse(rest) {
+                    cfg.fallback = Some(h);
                 }
             }
             other => tracing::warn!(directive = other, "unknown config directive"),
@@ -420,6 +426,15 @@ timeout 900
         assert_eq!(contents.matches("harness ").count(), 1);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_fallback_directive() {
+        let mut cfg = Config::default();
+        assert!(cfg.fallback.is_none());
+        apply_orbit_config(&mut cfg, "fallback opencode acp");
+        assert_eq!(cfg.fallback.as_ref().unwrap().command, "opencode");
+        assert_eq!(cfg.fallback.as_ref().unwrap().args, vec!["acp".to_string()]);
     }
 
     #[test]

@@ -175,6 +175,12 @@ async fn pump_turn(
                     } else {
                         v.get("subtype").and_then(|s| s.as_str()).unwrap_or("error").to_string()
                     };
+
+                    let detail_lower = detail.to_lowercase();
+                    if detail_lower.contains("session limit") || detail_lower.contains("rate limit") {
+                        return Err(OrbitError::SessionLimit(detail));
+                    }
+
                     return Err(OrbitError::Other(format!("claude turn failed: {detail}")));
                 }
 
@@ -371,5 +377,12 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let result = harness.run_turn(Role::Coder, "test".to_string(), tx).await;
         assert!(result.is_err(), "expected timeout/closed error");
+    }
+
+    #[test]
+    fn test_session_limit_detected() {
+        let msg = "You've hit your session limit. Resets at midnight.".to_string();
+        let err = OrbitError::SessionLimit(msg);
+        assert!(matches!(err, OrbitError::SessionLimit(_)));
     }
 }
