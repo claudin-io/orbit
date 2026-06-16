@@ -10,11 +10,16 @@ orbit git commit            # AI-assisted git commits
 
 ## Install
 
-One-liner that grabs the latest release binary for your platform and drops it in
-`/usr/local/bin`:
+One-liner that detects your OS and architecture, grabs the matching release
+binary, and drops it in `/usr/local/bin`:
 
 ```bash
-curl -fsSL "https://github.com/claudin-io/orbit/releases/latest/download/orbit-$([ "$(uname)" = Darwin ] && echo arm64-macos || echo x86_64-linux)" -o orbit && chmod +x orbit && sudo mv orbit /usr/local/bin/orbit
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) asset=orbit-arm64-macos ;;
+  Linux-x86_64) asset=orbit-x86_64-linux ;;
+  *) echo "Unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+esac
+curl -fsSL "https://github.com/claudin-io/orbit/releases/latest/download/$asset" -o orbit && chmod +x orbit && sudo mv orbit /usr/local/bin/orbit
 ```
 
 Then check it works:
