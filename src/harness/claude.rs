@@ -154,6 +154,11 @@ async fn pump_turn(
 
         match v.get("type").and_then(|t| t.as_str()) {
             Some("assistant") => handle_assistant(&v, events, cwd, &mut line_buf, &mut output),
+            Some("init") => {
+                if let Some(model) = v.get("model").and_then(|m| m.as_str()).map(|s| s.to_string()) {
+                    send_event(events, OrbitEvent::ModelInfo { model });
+                }
+            }
             Some("result") => {
                 let remaining = line_buf.trim();
                 if !remaining.is_empty() {
@@ -259,25 +264,6 @@ impl ClaudeHarness {
         cmd.spawn().map_err(|e| OrbitError::Other(format!("failed to spawn `{}`: {e}", self.command)))
     }
 
-    /// Read the initial `init` message from claude's stdout, extracting the
-    /// model name and emitting it as [`OrbitEvent::ModelInfo`].
-    async fn read_init(
-        lines: &mut Lines<BufReader<ChildStdout>>,
-        events: &EventSink,
-    ) -> Result<(), OrbitError> {
-        let Some(line) = lines.next_line().await? else {
-            return Err(OrbitError::Other("claude closed before sending init".to_string()));
-        };
-        if let Ok(v) = serde_json::from_str::<Value>(&line) {
-            if v.get("type").and_then(|t| t.as_str()) == Some("init") {
-                if let Some(model) = v.get("model").and_then(|m| m.as_str()).map(|s| s.to_string()) {
-                    send_event(events, OrbitEvent::ModelInfo { model });
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// Write one prompt and pump the turn, applying the prompt timeout.
     async fn run_one(
         &self,
@@ -316,9 +302,6 @@ impl Harness for ClaudeHarness {
         let stdout = child.stdout.take().expect("stdout piped");
         let mut lines = BufReader::new(stdout).lines();
 
-        // Read init message (emits ModelInfo if present).
-        Self::read_init(&mut lines, &events).await?;
-
         let data = self.run_one(&mut stdin, &mut lines, &prompt, &events).await;
         // Close stdin so claude exits cleanly, then reap it.
         drop(stdin);
@@ -338,9 +321,6 @@ impl Harness for ClaudeHarness {
         let mut stdin = child.stdin.take().expect("stdin piped");
         let stdout = child.stdout.take().expect("stdout piped");
         let mut lines = BufReader::new(stdout).lines();
-
-        // Read init message (emits ModelInfo if present).
-        Self::read_init(&mut lines, &events).await?;
 
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
         let harness = ClaudeHarness {
