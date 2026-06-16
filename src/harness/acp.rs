@@ -359,11 +359,15 @@ fn spawn_session_task(
                         .block_task()
                         .run_until(async move |mut session| {
                             if let Some(model) = extract_model(&session.response().config_options) {
+                                let tool_name = cmd_str.split_once(char::is_whitespace)
+                                    .map(|(cmd, _)| cmd.to_string())
+                                    .unwrap_or_else(|| cmd_str.clone());
                                 send_event(&events, OrbitEvent::ModelInfo {
-                                    tool: cmd_str.clone(),
+                                    tool: tool_name,
                                     model: Some(model),
                                 });
                             }
+
                             while let Some(cmd) = cmd_rx.recv().await {
                                 match cmd {
                                     SessionCommand::RunTurn { prompt, result } => {
@@ -586,8 +590,12 @@ impl AcpHarness {
                             let cwd = cwd.clone();
                             async move |mut session| {
                                 if let Some(model) = extract_model(&session.response().config_options) {
+                                    let full = self.cmd_str();
+                                    let tool_name = full.split_once(char::is_whitespace)
+                                        .map(|(cmd, _)| cmd.to_string())
+                                        .unwrap_or_else(|| full);
                                     send_event(&events, OrbitEvent::ModelInfo {
-                                        tool: self.cmd_str(),
+                                        tool: tool_name,
                                         model: Some(model),
                                     });
                                 }

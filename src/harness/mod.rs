@@ -165,8 +165,11 @@ impl SessionRouter {
         if !self.sessions.contains_key(&key) {
             // Show which harness is about to start. The harness itself may
             // emit ModelInfo with a model name later (e.g. ACP config_options).
+            let tool_name = hc.command.split_once(char::is_whitespace)
+                .map(|(cmd, _)| cmd.to_string())
+                .unwrap_or_else(|| hc.command.clone());
             let _ = self.events.send(OrbitEvent::ModelInfo {
-                tool: hc.to_command_line(),
+                tool: tool_name,
                 model: None,
             });
 
