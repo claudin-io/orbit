@@ -177,6 +177,20 @@ impl Renderer {
             return;
         }
 
+        if let OrbitEvent::PromptInput { message, tx } = event {
+            let _ = write!(std::io::stdout(), "  {} {} ", c("?", YLW), c(&message, BLD));
+            let _ = std::io::stdout().flush();
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input).ok();
+            let _ = tx.send(input.trim().to_string());
+            return;
+        }
+
+        if let OrbitEvent::Notice { message } = event {
+            let _ = writeln!(std::io::stdout(), "  {} {}", c("•", DIM), message);
+            return;
+        }
+
         if self.verbose {
             self.handle_verbose(event);
             return;

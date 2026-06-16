@@ -72,13 +72,26 @@ impl Config {
 
 /// Parse a command line ("cmd arg1 arg2") into a [`HarnessConfig`].
 /// Returns `None` when the line is empty.
-fn parse_cmd(rest: &str) -> Option<HarnessConfig> {
-    let parts: Vec<&str> = rest.split_whitespace().collect();
-    let (cmd, args) = parts.split_first()?;
-    Some(HarnessConfig {
-        command: (*cmd).to_string(),
-        args: args.iter().map(|s| s.to_string()).collect(),
-    })
+impl HarnessConfig {
+    /// Parse a command line ("cmd arg1 arg2") into a [`HarnessConfig`].
+    /// Returns `None` when the line has no command token.
+    pub fn parse(line: &str) -> Option<HarnessConfig> {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        let (cmd, args) = parts.split_first()?;
+        Some(HarnessConfig {
+            command: (*cmd).to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+        })
+    }
+
+    /// Render back to a command line ("cmd arg1 arg2").
+    pub fn to_command_line(&self) -> String {
+        if self.args.is_empty() {
+            self.command.clone()
+        } else {
+            format!("{} {}", self.command, self.args.join(" "))
+        }
+    }
 }
 
 /// Apply directives from a `.orbit` config file onto `cfg`. Later layers
@@ -106,14 +119,14 @@ pub fn apply_orbit_config(cfg: &mut Config, contents: &str) {
             .unwrap_or((line, ""));
         match kw {
             "harness" => {
-                if let Some(h) = parse_cmd(rest) {
+                if let Some(h) = HarnessConfig::parse(rest) {
                     cfg.harness = h;
                 }
             }
             "step" => {
                 // rest = "<name> = <cmd...>"
                 if let Some((name, val)) = rest.split_once('=') {
-                    if let Some(h) = parse_cmd(val.trim()) {
+                    if let Some(h) = HarnessConfig::parse(val.trim()) {
                         match name.trim() {
                             "plan" => cfg.steps.plan = Some(h),
                             "code" => cfg.steps.code = Some(h),
@@ -147,7 +160,7 @@ pub fn home_config_path() -> Option<PathBuf> {
 }
 
 /// Path to the project config file: `<target>/.orbit/config.orbit`.
-fn project_config_path(target: &Path) -> PathBuf {
+pub fn project_config_path(target: &Path) -> PathBuf {
     target.join(".orbit").join("config.orbit")
 }
 
@@ -212,6 +225,48 @@ pub fn save_acp_default(config_path: &Path, command_str: &str) -> anyhow::Result
         out.push('\n');
     }
     std::fs::write(config_path, out)?;
+    Ok(())
+}
+
+/// Write a full `.orbit` config: the `harness` line followed by `step` lines for
+/// each configured step. Any existing `max_attempts`/`timeout`/comment lines are
+/// preserved (only `harness`/`step` lines are replaced).
+pub fn write_orbit_config(
+    path: &Path,
+    harness: &HarnessConfig,
+    steps: &StepsConfig,
+) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Preserve everything except existing harness/step lines.
+    let mut preserved: Vec<String> = Vec::new();
+    if let Ok(existing) = std::fs::read_to_string(path) {
+        for line in existing.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("harness") || trimmed.starts_with("step") {
+                continue;
+            }
+            preserved.push(line.to_string());
+        }
+    }
+
+    let mut out = format!("harness {}\n", harness.to_command_line());
+    if let Some(h) = &steps.plan {
+        out.push_str(&format!("step plan = {}\n", h.to_command_line()));
+    }
+    if let Some(h) = &steps.code {
+        out.push_str(&format!("step code = {}\n", h.to_command_line()));
+    }
+    if let Some(h) = &steps.evaluation {
+        out.push_str(&format!("step eval = {}\n", h.to_command_line()));
+    }
+    for line in preserved {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    std::fs::write(path, out)?;
     Ok(())
 }
 
@@ -306,6 +361,61 @@ timeout 900
         assert!(contents.contains("max_attempts 4"));
         // Only one harness line.
         assert_eq!(contents.matches("harness ").count(), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_harness_config_parse() {
+        let hc = HarnessConfig::parse("claude --acp --flag").unwrap();
+        assert_eq!(hc.command, "claude");
+        assert_eq!(hc.args, vec!["--acp".to_string(), "--flag".to_string()]);
+        assert_eq!(hc.to_command_line(), "claude --acp --flag");
+
+        assert!(HarnessConfig::parse("").is_none());
+        assert!(HarnessConfig::parse("   ").is_none());
+    }
+
+    #[test]
+    fn test_write_orbit_config_with_steps_preserves_other_lines() {
+        let dir = std::env::temp_dir().join(format!("orbit-write-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.orbit");
+        // Existing config with steps to be replaced and loop settings to keep.
+        std::fs::write(
+            &path,
+            "# my config\nharness old\nstep code = old-code\nmax_attempts 7\ntimeout 900\n",
+        )
+        .unwrap();
+
+        let harness = HarnessConfig::parse("claude-code-acp").unwrap();
+        let steps = StepsConfig {
+            plan: HarnessConfig::parse("claude --acp"),
+            code: None,
+            evaluation: HarnessConfig::parse("pi.dev --acp"),
+        };
+        write_orbit_config(&path, &harness, &steps).unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("harness claude-code-acp"));
+        assert!(contents.contains("step plan = claude --acp"));
+        assert!(contents.contains("step eval = pi.dev --acp"));
+        // code step omitted (None) and old step replaced.
+        assert!(!contents.contains("step code"));
+        // Preserved lines.
+        assert!(contents.contains("# my config"));
+        assert!(contents.contains("max_attempts 7"));
+        assert!(contents.contains("timeout 900"));
+        assert_eq!(contents.matches("harness ").count(), 1);
+
+        // Re-parsing yields the configured values.
+        let mut cfg = Config::default();
+        apply_orbit_config(&mut cfg, &contents);
+        assert_eq!(cfg.harness.command, "claude-code-acp");
+        assert_eq!(cfg.steps.plan.as_ref().unwrap().command, "claude");
+        assert!(cfg.steps.code.is_none());
+        assert_eq!(cfg.steps.evaluation.as_ref().unwrap().command, "pi.dev");
+        assert_eq!(cfg.r#loop.max_attempts, 7);
 
         std::fs::remove_dir_all(&dir).ok();
     }

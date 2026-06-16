@@ -16,6 +16,7 @@ pub async fn dispatch(cli: Cli, events: EventSink) -> Result<(), OrbitError> {
             run_simple_loop(run_config, events).await
         }
         Command::Git { action } => crate::git::dispatch(action, events).await,
+        Command::Config => crate::config_wizard::run_wizard(events).await,
         Command::Acp { action } => match action {
             AcpAction::SetDefault { command } => {
                 let config_path = config::home_config_path()

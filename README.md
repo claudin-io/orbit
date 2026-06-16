@@ -59,6 +59,21 @@ orbit run -v --spec spec.md                      # verbose output
 | `--max-attempts` | Max eval-feedback loops | `5` |
 | `-v`, `--verbose` | Verbose output | `false` |
 
+### `orbit config` — interactive configuration wizard
+
+```bash
+orbit config   # guided setup, validates each ACP, writes .orbit automatically
+```
+
+Walks you through:
+1. **Where to save** — global (`~/.orbit/config.orbit`) or project (`<cwd>/.orbit/config.orbit`).
+2. **ACP mode** — the same agent for every step, or per-step (`plan`/`code`/`eval`).
+3. **Type each ACP command** — pressing Enter runs a handshake immediately. On
+   failure you can rewrite, save anyway, or cancel. In per-step mode you give a
+   base command first; leaving a step blank reuses the base.
+
+Existing `max_attempts`/`timeout`/comment lines in the file are preserved.
+
 ### `orbit acp` — manage ACP agent
 
 ```bash
@@ -99,6 +114,8 @@ Orbit speaks [ACP (Agent Client Protocol)](https://opencode.ai/docs/acp/) over s
 ## Configuration
 
 Config lives in `.orbit/config.orbit` files using orbit's own line-based format.
+Run `orbit config` for a guided wizard that validates each agent and writes the
+file for you, or edit it by hand as below.
 
 Resolution order (later overrides earlier):
 

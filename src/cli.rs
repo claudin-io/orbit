@@ -42,6 +42,9 @@ pub enum Command {
         action: AcpAction,
     },
 
+    #[command(about = "Interactive configuration wizard")]
+    Config,
+
     #[command(about = "AI-assisted git operations")]
     Git {
         #[command(subcommand)]
@@ -246,6 +249,12 @@ mod tests {
             },
             _ => panic!("expected Acp"),
         }
+    }
+
+    #[test]
+    fn test_config_command_parses() {
+        let cli = Cli::parse_from(["orbit", "config"]);
+        assert!(matches!(cli.command, Command::Config));
     }
 
     #[test]

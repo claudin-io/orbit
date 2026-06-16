@@ -68,12 +68,16 @@ pub enum OrbitEvent {
     RunFinished { exit_code: i32 },
     RunFailed { reason: String },
     ConfirmRequest { message: String, default: bool, tx: tokio::sync::oneshot::Sender<bool> },
+    PromptInput { message: String, tx: tokio::sync::oneshot::Sender<String> },
+    Notice { message: String },
 }
 
 impl Clone for OrbitEvent {
     fn clone(&self) -> Self {
         match self {
             Self::ConfirmRequest { .. } => panic!("ConfirmRequest cannot be cloned"),
+            Self::PromptInput { .. } => panic!("PromptInput cannot be cloned"),
+            Self::Notice { message } => Self::Notice { message: message.clone() },
             Self::PhaseChanged(v) => Self::PhaseChanged(v.clone()),
             Self::RunStarted { spec_path, target } => Self::RunStarted { spec_path: spec_path.clone(), target: target.clone() },
             Self::AgentChunk(v) => Self::AgentChunk(v.clone()),

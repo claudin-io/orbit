@@ -28,7 +28,10 @@ async fn main() -> anyhow::Result<()> {
     }
     let cli = Cli::parse();
 
-    if matches!(cli.command, orbit::cli::Command::Run { .. } | orbit::cli::Command::Git { .. }) {
+    if matches!(
+        cli.command,
+        orbit::cli::Command::Run { .. } | orbit::cli::Command::Git { .. } | orbit::cli::Command::Config
+    ) {
         orbit::render::print_banner(orbit::cli::ORBIT_VERSION);
     }
 
@@ -37,9 +40,9 @@ async fn main() -> anyhow::Result<()> {
             .as_ref()
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
-        orbit::cli::Command::Acp { .. } | orbit::cli::Command::Git { .. } => {
-            std::env::current_dir().unwrap_or_default()
-        }
+        orbit::cli::Command::Acp { .. }
+        | orbit::cli::Command::Git { .. }
+        | orbit::cli::Command::Config => std::env::current_dir().unwrap_or_default(),
     };
     let _guard = init_tracing(&target)?;
     let (events_tx, events_rx) = events::channel();
