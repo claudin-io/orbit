@@ -7,7 +7,7 @@ use crate::config::{Config, HarnessConfig};
 use crate::events::EventSink;
 use crate::harness::acp::AcpHarness;
 use crate::harness::claude::{is_native_claude, ClaudeHarness};
-use crate::types::{Role, TurnOutcome};
+use crate::types::{OrbitEvent, Role, TurnOutcome};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -163,6 +163,13 @@ impl SessionRouter {
         let key = self.key_for_role(role);
 
         if !self.sessions.contains_key(&key) {
+            // Emit model info before starting the session so the user sees which
+            // harness is about to be used. The harness itself may override this
+            // later with a more precise model name (e.g. ACP config_options).
+            let _ = self.events.send(OrbitEvent::ModelInfo {
+                model: hc.to_command_line(),
+            });
+
             let harness = make_harness(
                 &hc,
                 &self.target,
