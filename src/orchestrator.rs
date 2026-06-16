@@ -3,7 +3,7 @@ use crate::cli::Cli;
 use crate::config;
 use crate::error::OrbitError;
 use crate::events::{EventSink, emit};
-use crate::harness::{Harness, HarnessSession};
+use crate::harness::{Harness, HarnessSession, SessionRouter};
 use crate::harness::acp::AcpHarness;
 use crate::prompts::{EVALUATOR_TEMPLATE, PROMPTER_REVISION_TEMPLATE, PROMPTER_TEMPLATE, extract_fenced_json, render, sanitize_llm_json};
 use crate::types::{EvalVerdict, OrbitEvent, PrompterOutput, Role, RunPhase};
@@ -18,8 +18,8 @@ pub async fn dispatch(cli: Cli, events: EventSink) -> Result<(), OrbitError> {
         Command::Git { action } => crate::git::dispatch(action, events).await,
         Command::Acp { action } => match action {
             AcpAction::SetDefault { command } => {
-                let home = std::env::var("HOME").map_err(|_| OrbitError::Config("HOME not set".to_string()))?;
-                let config_path = std::path::PathBuf::from(home).join(".orbit").join("config.toml");
+                let config_path = config::home_config_path()
+                    .ok_or_else(|| OrbitError::Config("HOME not set".to_string()))?;
                 config::save_acp_default(&config_path, command)?;
                 println!("Saved default ACP command: {}", command);
                 Ok(())
@@ -105,19 +105,15 @@ async fn run_simple_loop(run_config: config::RunConfig, events: EventSink) -> Re
         }
     );
 
-    let harness = AcpHarness::new(
-        config.harness.command.clone(),
-        config.harness.args.clone(),
-        target.clone(),
-        config.r#loop.prompt_timeout_secs,
-    );
-
-    let events_for_session = events.clone();
-    let mut session = harness.start_session(events_for_session).await?;
+    let max_attempts = config.r#loop.max_attempts;
+    let mut router = SessionRouter::new(config, target.clone(), events.clone());
 
     emit!(events, OrbitEvent::PhaseChanged(RunPhase::Prompting));
 
-    let prompter_output = run_prompter(&mut session, &spec_content).await?;
+    let prompter_output = {
+        let session = router.session_for(Role::Prompter).await?;
+        run_prompter(session, &spec_content).await?
+    };
     let prompt_summary = extract_goal(&prompter_output.prompt);
 
     emit!(
@@ -130,7 +126,6 @@ async fn run_simple_loop(run_config: config::RunConfig, events: EventSink) -> Re
 
     let rubric_text = rubrics_to_display(&prompter_output.rubric);
     let mut prompt = prompter_output.prompt;
-    let max_attempts = config.r#loop.max_attempts;
 
     for attempt in 1..=max_attempts {
         emit!(events, OrbitEvent::PhaseChanged(RunPhase::Coding));
@@ -142,7 +137,10 @@ async fn run_simple_loop(run_config: config::RunConfig, events: EventSink) -> Re
             }
         );
 
-        let coder_outcome = session.run_turn(Role::Coder, prompt.clone()).await?;
+        let coder_outcome = {
+            let session = router.session_for(Role::Coder).await?;
+            session.run_turn(Role::Coder, prompt.clone()).await?
+        };
         let coder_text = coder_outcome.full_text;
 
         let coder_summary = summarize_coder_output(&coder_text);
@@ -152,8 +150,10 @@ async fn run_simple_loop(run_config: config::RunConfig, events: EventSink) -> Re
 
         emit!(events, OrbitEvent::PhaseChanged(RunPhase::Evaluating));
 
-        let eval_outcome =
-            run_evaluator(&mut session, &spec_content, &rubric_text, &coder_text).await?;
+        let eval_outcome = {
+            let session = router.session_for(Role::Evaluator).await?;
+            run_evaluator(session, &spec_content, &rubric_text, &coder_text).await?
+        };
         let results = eval_outcome.results.clone();
 
         if eval_outcome.approved {
@@ -184,8 +184,9 @@ async fn run_simple_loop(run_config: config::RunConfig, events: EventSink) -> Re
 
         if attempt < max_attempts {
             emit!(events, OrbitEvent::PhaseChanged(RunPhase::Prompting));
+            let session = router.session_for(Role::Prompter).await?;
             prompt = run_prompter_revision(
-                &mut session,
+                session,
                 &spec_content,
                 &coder_text,
                 &eval_outcome.feedback,

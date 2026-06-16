@@ -126,14 +126,7 @@ pub fn resolve_config(cli: &Cli) -> anyhow::Result<RunConfig> {
             cfg.harness.command = parts[0].to_string();
             cfg.harness.args = parts[1..].iter().map(|s| s.to_string()).collect();
         }
-    } else if cfg.harness.command == "claude-code-acp"
-        && let Some(saved) = crate::config::load_acp_default_from_home() {
-            let parts: Vec<&str> = saved.split_whitespace().collect();
-            if !parts.is_empty() {
-                cfg.harness.command = parts[0].to_string();
-                cfg.harness.args = parts[1..].iter().map(|s| s.to_string()).collect();
-            }
-        }
+    }
 
     if let Some(ma) = max_attempts {
         cfg.r#loop.max_attempts = *ma;

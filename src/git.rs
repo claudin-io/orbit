@@ -2,8 +2,7 @@ use crate::cli::GitCliAction;
 use crate::config;
 use crate::error::OrbitError;
 use crate::events::{EventSink, emit};
-use crate::harness::{Harness, HarnessSession};
-use crate::harness::acp::AcpHarness;
+use crate::harness::{HarnessSession, SessionRouter};
 use crate::prompts::{extract_fenced_json, render, sanitize_llm_json};
 use crate::render;
 use crate::types::{EvalVerdict, OrbitEvent, PrompterOutput, Role, RunPhase};
@@ -92,16 +91,7 @@ pub async fn dispatch(action: &GitCliAction, events: EventSink) -> Result<(), Or
 
 async fn run_git_commit_loop(all: bool, yes: bool, events: EventSink) -> Result<(), OrbitError> {
     let target = std::env::current_dir().map_err(OrbitError::Io)?;
-    let mut config = config::load(None, &target);
-    if config.harness.command == "claude-code-acp"
-        && let Some(saved) = config::load_acp_default_from_home()
-    {
-        let parts: Vec<&str> = saved.split_whitespace().collect();
-        if !parts.is_empty() {
-            config.harness.command = parts[0].to_string();
-            config.harness.args = parts[1..].iter().map(|s| s.to_string()).collect();
-        }
-    }
+    let config = config::load(None, &target);
 
     emit!(
         events,
@@ -111,15 +101,8 @@ async fn run_git_commit_loop(all: bool, yes: bool, events: EventSink) -> Result<
         }
     );
 
-    let harness = AcpHarness::new(
-        config.harness.command.clone(),
-        config.harness.args.clone(),
-        target,
-        config.r#loop.prompt_timeout_secs,
-    );
-
-    let mut session = harness.start_session(events.clone()).await?;
     let max_attempts = config.r#loop.max_attempts;
+    let mut router = SessionRouter::new(config, target, events.clone());
     let mut plan_text = String::new();
     let mut plan_feedback = String::new();
     let mut plan_diagnosis = String::new();
@@ -146,7 +129,10 @@ async fn run_git_commit_loop(all: bool, yes: bool, events: EventSink) -> Result<
             render(PROMPT_GIT_PLANNER_REVISION, &ctx)
         };
 
-        let planner_outcome = session.run_turn(Role::Prompter, planner_prompt).await?;
+        let planner_outcome = {
+            let session = router.session_for(Role::Prompter).await?;
+            session.run_turn(Role::Prompter, planner_prompt).await?
+        };
         let output = parse_git_planner_output(&planner_outcome.full_text)?;
 
         plan_text = output.prompt;
@@ -182,7 +168,10 @@ async fn run_git_commit_loop(all: bool, yes: bool, events: EventSink) -> Result<
 
         emit!(events, OrbitEvent::PhaseChanged(RunPhase::GitReviewing));
 
-        let eval_outcome = run_plan_evaluator(&mut session, &plan_text, &rubric_text).await?;
+        let eval_outcome = {
+            let session = router.session_for(Role::Evaluator).await?;
+            run_plan_evaluator(session, &plan_text, &rubric_text).await?
+        };
 
         emit!(
             events,
@@ -235,7 +224,10 @@ async fn run_git_commit_loop(all: bool, yes: bool, events: EventSink) -> Result<
         let mut ctx: HashMap<&str, &str> = HashMap::new();
         ctx.insert("plan", &plan_text);
         let committer_prompt = render(PROMPT_GIT_COMMITTER, &ctx);
-        let outcome = session.run_turn(Role::Coder, committer_prompt).await?;
+        let outcome = {
+            let session = router.session_for(Role::Coder).await?;
+            session.run_turn(Role::Coder, committer_prompt).await?
+        };
 
         emit!(
             events,

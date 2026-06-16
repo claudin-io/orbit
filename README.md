@@ -62,7 +62,7 @@ orbit run -v --spec spec.md                      # verbose output
 ### `orbit acp` — manage ACP agent
 
 ```bash
-orbit acp set-default "opencode acp"   # save default to ~/.orbit/config.toml
+orbit acp set-default "opencode acp"   # save default to ~/.orbit/config.orbit
 orbit acp handshake                     # test connectivity
 ```
 
@@ -98,30 +98,41 @@ Orbit speaks [ACP (Agent Client Protocol)](https://opencode.ai/docs/acp/) over s
 
 ## Configuration
 
+Config lives in `.orbit/config.orbit` files using orbit's own line-based format.
+
 Resolution order (later overrides earlier):
 
 1. Built-in defaults (`claude-code-acp`, 5 attempts, 1200s timeout)
-2. `~/.orbit/config.toml` — user-level ACP fallback
-3. `--config` path — explicit config file
-4. `./orbit.toml` — project-level config
+2. `~/.orbit/config.orbit` — user-level (global)
+3. `<target>/.orbit/config.orbit` — project-level
+4. `--config` path — explicit config file
 5. CLI flags — `--acp` and `--max-attempts` win everything
 
-```toml
-# orbit.toml (project-level)
-[harness]
-command = "opencode"
-args = ["acp"]
-
-[loop]
-max_attempts = 5
-prompt_timeout_secs = 1200
 ```
+# .orbit/config.orbit
+harness claude-code-acp        # fallback for any step without an override
+
+# Per-step ACP agent (optional). Steps: plan, code, eval (alias: evaluation).
+step plan = claude --acp
+step code = opencode --acp
+step eval = pi.dev --acp
+
+max_attempts 5
+timeout 1200                   # prompt_timeout_secs
+```
+
+**Per-step ACP:** each step of the loop can run a different ACP agent. `plan` →
+the Prompter (and git Planner), `code` → the Coder (and git Committer), `eval` →
+the Evaluator (and git plan Reviewer). A step with no override falls back to
+`harness`. When every step resolves to the same command, they share one ACP
+session (the default behavior). Inside `step ...`, `command` is required —
+the first token is the binary, the rest are its arguments.
 
 ## Architecture
 
 ### Session model
 
-ACP communication uses a persistent session (`HarnessSession` trait). The harness starts a session once, then routes multiple agent turns through it. No reconnect, no per-turn negotiation.
+ACP communication uses persistent sessions (`HarnessSession` trait). A `SessionRouter` lazily starts one session per distinct ACP command and routes each step's turns to it — so with the default config all steps share a single session, while per-step overrides get their own. No reconnect, no per-turn negotiation.
 
 ### Runtime artifacts
 
