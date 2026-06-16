@@ -9,10 +9,17 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
 
-fn init_tracing(target: &Path, debug: bool) -> anyhow::Result<WorkerGuard> {
-    let log_dir = target.join(".orbit").join("logs");
+fn init_tracing(log_path: &Path, debug: bool) -> anyhow::Result<WorkerGuard> {
+    let log_dir = log_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let file_name = log_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "orbit-run.log".to_string());
     std::fs::create_dir_all(&log_dir)?;
-    let file_appender = tracing_appender::rolling::never(log_dir, "orbit.log");
+    let file_appender = tracing_appender::rolling::never(log_dir, file_name);
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     // File layer keeps its existing behavior: RUST_LOG, else `info`.
@@ -67,7 +74,22 @@ async fn main() -> anyhow::Result<()> {
         | orbit::cli::Command::Config => std::env::current_dir().unwrap_or_default(),
     };
     let debug = cli.debug;
-    let _guard = init_tracing(&target, debug)?;
+
+    // The usage log goes to a temp file: deleted on success, kept on failure so
+    // it can be attached to a bug report.
+    let log_path = orbit::report::temp_log_path();
+    let _guard = init_tracing(&log_path, debug)?;
+
+    // Explicit `--config` path (Run only), needed by the failure report.
+    let explicit_config = match &cli.command {
+        orbit::cli::Command::Run { config, .. } => config.clone(),
+        _ => None,
+    };
+
+    // Capture panics anywhere in the process: write a report (control may not
+    // return past the unwind) and point the user at it, then run the default hook.
+    install_panic_hook(log_path.clone(), target.clone(), explicit_config.clone());
+
     let (events_tx, events_rx) = events::channel();
 
     let verbose = debug
@@ -95,7 +117,52 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    orchestrator::dispatch(cli, events_tx).await?;
+    let result = orchestrator::dispatch(cli, events_tx).await;
     render_handle.await.ok();
-    Ok(())
+
+    // Flush the non-blocking appender before reading or removing the log file.
+    drop(_guard);
+
+    match result {
+        Ok(()) => {
+            // Success: drop the temp usage log.
+            let _ = std::fs::remove_file(&log_path);
+            Ok(())
+        }
+        Err(e) if matches!(e, orbit::error::OrbitError::Exhausted(_)) => {
+            // Expected outcome (loop didn't converge), not a defect: no report.
+            let _ = std::fs::remove_file(&log_path);
+            Err(e.into())
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            match orbit::report::write_report(
+                &log_path,
+                &target,
+                explicit_config.as_deref(),
+                &msg,
+            ) {
+                Ok(report_path) => orbit::report::print_failure_notice(&report_path, &msg),
+                Err(_) => eprintln!("Error: {}", msg),
+            }
+            std::process::exit(e.exit_code());
+        }
+    }
+}
+
+fn install_panic_hook(
+    log_path: std::path::PathBuf,
+    target: std::path::PathBuf,
+    explicit_config: Option<String>,
+) {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = format!("panic: {}", info);
+        if let Ok(report_path) =
+            orbit::report::write_report(&log_path, &target, explicit_config.as_deref(), &msg)
+        {
+            orbit::report::print_failure_notice(&report_path, &msg);
+        }
+        default_hook(info);
+    }));
 }

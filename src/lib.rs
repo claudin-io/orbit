@@ -9,5 +9,6 @@ pub mod harness;
 pub mod orchestrator;
 pub mod prompts;
 pub mod render;
+pub mod report;
 pub mod tool_format;
 pub mod types;

@@ -4,7 +4,7 @@ use crate::config;
 use crate::error::OrbitError;
 use crate::events::{EventSink, emit};
 use crate::harness::SessionRouter;
-use crate::prompts::{EVALUATOR_TEMPLATE, PROMPTER_REVISION_TEMPLATE, PROMPTER_TEMPLATE, extract_fenced_json, render, sanitize_llm_json};
+use crate::prompts::{EVALUATOR_TEMPLATE, PROMPTER_REVISION_TEMPLATE, PROMPTER_TEMPLATE, extract_fenced_json, extract_json_object, render, sanitize_llm_json};
 use crate::types::{EvalVerdict, OrbitEvent, PrompterOutput, Role, RunPhase, TurnOutcome};
 
 pub async fn dispatch(cli: Cli, events: EventSink) -> Result<(), OrbitError> {
@@ -320,15 +320,16 @@ fn dump_debug_agent_output(text: &str, label: &str) {
 fn parse_prompter_output(text: &str) -> Result<PrompterOutput, OrbitError> {
     let raw = text.trim();
     let raw = sanitize_llm_json(raw);
-    let json_str =
-        extract_fenced_json(&raw).or_else(|| {
+    let json_str = extract_fenced_json(&raw)
+        .or_else(|| {
             let t = raw.trim();
             if t.starts_with('{') {
                 Some(t)
             } else {
                 None
             }
-        });
+        })
+        .or_else(|| extract_json_object(&raw));
     let json_str = match json_str {
         Some(s) => s,
         None => {
@@ -350,15 +351,16 @@ fn parse_prompter_output(text: &str) -> Result<PrompterOutput, OrbitError> {
 fn parse_eval_verdict(text: &str) -> Result<EvalVerdict, OrbitError> {
     let raw = text.trim();
     let raw = sanitize_llm_json(raw);
-    let json_str =
-        extract_fenced_json(&raw).or_else(|| {
+    let json_str = extract_fenced_json(&raw)
+        .or_else(|| {
             let t = raw.trim();
             if t.starts_with('{') {
                 Some(t)
             } else {
                 None
             }
-        });
+        })
+        .or_else(|| extract_json_object(&raw));
     let json_str = match json_str {
         Some(s) => s,
         None => {
@@ -431,6 +433,23 @@ mod tests {
         let text = r#"{"approved": false, "feedback": "no", "diagnosis": "bad"}"#;
         let result = parse_eval_verdict(text).unwrap();
         assert!(!result.approved);
+    }
+
+    #[test]
+    fn test_parse_eval_verdict_prose_then_raw_json() {
+        // Real-world case: agent emits a sentence of prose before the raw,
+        // un-fenced JSON object. Previously failed with "No JSON found".
+        let text = "All criteria met. Documentation matches implementation.\n\n{\"approved\": true, \"feedback\": \"ok\", \"diagnosis\": \"all good\"}";
+        let result = parse_eval_verdict(text).unwrap();
+        assert!(result.approved);
+        assert_eq!(result.feedback, "ok");
+    }
+
+    #[test]
+    fn test_parse_prompter_output_prose_then_raw_json() {
+        let text = "Here is the prompt and rubric.\n\n{\"prompt\": \"Goal: Implement X\", \"rubric\": []}";
+        let result = parse_prompter_output(text).unwrap();
+        assert_eq!(result.prompt, "Goal: Implement X");
     }
 
     #[test]

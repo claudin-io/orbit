@@ -188,6 +188,43 @@ pub fn extract_fenced_json(text: &str) -> Option<&str> {
     None
 }
 
+/// Find the first balanced JSON object (`{...}`) embedded anywhere in `text`,
+/// ignoring braces that appear inside string literals. Used when an LLM emits
+/// prose before the JSON it was asked to return (e.g. some ACP agents).
+pub fn extract_json_object(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let start = text.find('{')?;
+
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&text[start..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +262,35 @@ mod tests {
     #[test]
     fn test_extract_fenced_json_no_fence() {
         assert!(extract_fenced_json("just text").is_none());
+    }
+
+    #[test]
+    fn test_extract_json_object_after_prose() {
+        let text = "All criteria met. Documentation matches.\n\n{\"approved\": true, \"feedback\": \"ok\"}";
+        assert_eq!(
+            extract_json_object(text),
+            Some("{\"approved\": true, \"feedback\": \"ok\"}")
+        );
+    }
+
+    #[test]
+    fn test_extract_json_object_ignores_braces_in_strings() {
+        let text = "prose {\"k\": \"a } b { c\", \"n\": 1} trailing";
+        assert_eq!(
+            extract_json_object(text),
+            Some("{\"k\": \"a } b { c\", \"n\": 1}")
+        );
+    }
+
+    #[test]
+    fn test_extract_json_object_nested() {
+        let text = "x {\"a\": {\"b\": 1}} y";
+        assert_eq!(extract_json_object(text), Some("{\"a\": {\"b\": 1}}"));
+    }
+
+    #[test]
+    fn test_extract_json_object_none() {
+        assert!(extract_json_object("no json here").is_none());
     }
 
     #[test]
