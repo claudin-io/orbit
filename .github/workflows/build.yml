@@ -32,17 +32,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Compute version
+        id: version
+        shell: bash
+        run: |
+          mm=$(grep -m1 -E '^version[[:space:]]*=' Cargo.toml | sed -E 's/.*"([0-9]+\.[0-9]+).*/\1/')
+          ver="${mm}.$(date +%y%m%d).${{ github.run_number }}"
+          echo "ORBIT_VERSION=${ver}" >> "$GITHUB_ENV"
+          echo "tag=v${ver}" >> "$GITHUB_OUTPUT"
+
       - name: Build release
         uses: houseabsolute/actions-rust-cross@v1
         with:
           target: ${{ matrix.target }}
           args: "--release"
           strip: true
-
-      - name: Compute version
-        id: version
-        shell: bash
-        run: echo "tag=v0.2.$(date +%Y%m%d)-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
 
       - name: Rename binary
         shell: bash
