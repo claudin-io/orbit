@@ -129,10 +129,12 @@ async fn run_git_commit_loop(all: bool, yes: bool, events: EventSink) -> Result<
             render(PROMPT_GIT_PLANNER_REVISION, &ctx)
         };
 
+        tracing::debug!(attempt, prompt = %planner_prompt, "git planner prompt");
         let planner_outcome = {
             let session = router.session_for(Role::Prompter).await?;
             session.run_turn(Role::Prompter, planner_prompt).await?
         };
+        tracing::debug!(attempt, output = %planner_outcome.full_text, "git planner output");
         let output = parse_git_planner_output(&planner_outcome.full_text)?;
 
         plan_text = output.prompt;
@@ -224,10 +226,12 @@ async fn run_git_commit_loop(all: bool, yes: bool, events: EventSink) -> Result<
         let mut ctx: HashMap<&str, &str> = HashMap::new();
         ctx.insert("plan", &plan_text);
         let committer_prompt = render(PROMPT_GIT_COMMITTER, &ctx);
+        tracing::debug!(attempt, plan = %plan_text, "git committer executing plan");
         let outcome = {
             let session = router.session_for(Role::Coder).await?;
             session.run_turn(Role::Coder, committer_prompt).await?
         };
+        tracing::debug!(attempt, output = %outcome.full_text, "git committer output");
 
         emit!(
             events,

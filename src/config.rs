@@ -41,6 +41,8 @@ pub struct StepsConfig {
 pub struct LoopConfig {
     pub max_attempts: u32,
     pub prompt_timeout_secs: u64,
+    pub acp_retry_max_attempts: u32,
+    pub acp_retry_base_delay_ms: u64,
 }
 
 impl Default for LoopConfig {
@@ -48,6 +50,8 @@ impl Default for LoopConfig {
         Self {
             max_attempts: default_max_attempts(),
             prompt_timeout_secs: default_prompt_timeout_secs(),
+            acp_retry_max_attempts: default_acp_retry_max_attempts(),
+            acp_retry_base_delay_ms: default_acp_retry_base_delay_ms(),
         }
     }
 }
@@ -57,6 +61,12 @@ fn default_max_attempts() -> u32 {
 }
 fn default_prompt_timeout_secs() -> u64 {
     1200
+}
+fn default_acp_retry_max_attempts() -> u32 {
+    3
+}
+fn default_acp_retry_base_delay_ms() -> u64 {
+    1000
 }
 
 impl Config {
@@ -150,6 +160,16 @@ pub fn apply_orbit_config(cfg: &mut Config, contents: &str) {
                     cfg.r#loop.prompt_timeout_secs = n;
                 }
             }
+            "acp_retry_max_attempts" => {
+                if let Ok(n) = rest.parse() {
+                    cfg.r#loop.acp_retry_max_attempts = n;
+                }
+            }
+            "acp_retry_base_delay_ms" => {
+                if let Ok(n) = rest.parse() {
+                    cfg.r#loop.acp_retry_base_delay_ms = n;
+                }
+            }
             other => tracing::warn!(directive = other, "unknown config directive"),
         }
     }
@@ -207,6 +227,8 @@ pub fn load(explicit: Option<&str>, target: &Path) -> Config {
         eval = ?cfg.steps.evaluation.as_ref().map(|h| h.to_command_line()),
         max_attempts = cfg.r#loop.max_attempts,
         timeout_secs = cfg.r#loop.prompt_timeout_secs,
+        acp_retry_max_attempts = cfg.r#loop.acp_retry_max_attempts,
+        acp_retry_base_delay_ms = cfg.r#loop.acp_retry_base_delay_ms,
         "config resolved"
     );
 
@@ -328,6 +350,17 @@ timeout 900
         assert_eq!(cfg.steps.evaluation.as_ref().unwrap().command, "pi.dev");
         assert_eq!(cfg.r#loop.max_attempts, 7);
         assert_eq!(cfg.r#loop.prompt_timeout_secs, 900);
+    }
+
+    #[test]
+    fn test_apply_acp_retry_directives() {
+        let mut cfg = Config::default();
+        apply_orbit_config(
+            &mut cfg,
+            "acp_retry_max_attempts 5\nacp_retry_base_delay_ms 2000\n",
+        );
+        assert_eq!(cfg.r#loop.acp_retry_max_attempts, 5);
+        assert_eq!(cfg.r#loop.acp_retry_base_delay_ms, 2000);
     }
 
     #[test]

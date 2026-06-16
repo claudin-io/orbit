@@ -31,6 +31,8 @@ pub async fn dispatch(cli: Cli, events: EventSink) -> Result<(), OrbitError> {
                     &config.harness,
                     &target,
                     config.r#loop.prompt_timeout_secs,
+                    config.r#loop.acp_retry_max_attempts,
+                    config.r#loop.acp_retry_base_delay_ms,
                 );
                 println!(
                     "Connecting to ACP agent: {} {:?}",

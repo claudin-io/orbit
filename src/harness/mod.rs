@@ -19,6 +19,8 @@ pub fn make_harness(
     hc: &HarnessConfig,
     target: &Path,
     prompt_timeout_secs: u64,
+    acp_retry_max_attempts: u32,
+    acp_retry_base_delay_ms: u64,
 ) -> Box<dyn Harness> {
     if is_native_claude(&hc.command) {
         Box::new(ClaudeHarness::new(
@@ -33,6 +35,8 @@ pub fn make_harness(
             hc.args.clone(),
             target.to_path_buf(),
             prompt_timeout_secs,
+            acp_retry_max_attempts,
+            acp_retry_base_delay_ms,
         ))
     }
 }
@@ -94,7 +98,13 @@ impl SessionRouter {
         };
 
         if !self.sessions.contains_key(&key) {
-            let harness = make_harness(&hc, &self.target, self.config.r#loop.prompt_timeout_secs);
+            let harness = make_harness(
+                &hc,
+                &self.target,
+                self.config.r#loop.prompt_timeout_secs,
+                self.config.r#loop.acp_retry_max_attempts,
+                self.config.r#loop.acp_retry_base_delay_ms,
+            );
             let sess = harness.start_session(self.events.clone()).await?;
             self.sessions.insert(key.clone(), sess);
         }

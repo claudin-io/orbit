@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 
+#[derive(Clone)]
 struct SubagentConfig {
     cmd_str: String,
     cwd: PathBuf,
@@ -29,6 +30,12 @@ struct PendingTask {
 }
 
 async fn spawn_subagent_task(config: &SubagentConfig, task_prompt: &str) -> Result<String, OrbitError> {
+    tracing::debug!(
+        command = %config.cmd_str,
+        cwd = %config.cwd.display(),
+        prompt_len = task_prompt.len(),
+        "spawning subagent task"
+    );
     let agent: AcpAgent = config
         .cmd_str
         .parse()
@@ -289,14 +296,115 @@ enum SessionCommand {
 }
 
 pub struct AcpSessionHandle {
-    cmd_tx: mpsc::UnboundedSender<SessionCommand>,
+    cmd_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
+    cmd_str: String,
+    cwd: PathBuf,
+    timeout_secs: u64,
+    events: EventSink,
+    subagent: SubagentConfig,
+}
+
+fn spawn_session_task(
+    cmd_str: String,
+    cwd: PathBuf,
+    timeout_secs: u64,
+    events: EventSink,
+    subagent: SubagentConfig,
+) -> mpsc::UnboundedSender<SessionCommand> {
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
+
+    tokio::spawn(async move {
+        let agent: AcpAgent = match cmd_str.parse() {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::error!("Failed to create ACP agent: {e}");
+                return;
+            }
+        };
+
+        let timeout = Duration::from_secs(timeout_secs);
+        let _ = tokio::time::timeout(timeout, async {
+            let _ = Client
+                .builder()
+                .on_receive_request(
+                    async move |request: RequestPermissionRequest,
+                                responder: Responder<RequestPermissionResponse>,
+                                _cx: ConnectionTo<Agent>| {
+                        let outcome = auto_approve(&request);
+                        responder.respond(RequestPermissionResponse::new(outcome))
+                    },
+                    on_receive_request!(),
+                )
+                .connect_with(agent, async move |cx: ConnectionTo<Agent>| {
+                    cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                        .block_task()
+                        .await
+                        .map_err(|e| {
+                            tracing::error!("Session init failed: {e}");
+                            e
+                        })?;
+
+                    let _ = cx
+                        .build_session(&cwd)
+                        .block_task()
+                        .run_until(async move |mut session| {
+                            while let Some(cmd) = cmd_rx.recv().await {
+                                match cmd {
+                                    SessionCommand::RunTurn { prompt, result } => {
+                                        let text = match AcpHarness::run_turn_in_session(
+                                            &mut session,
+                                            &prompt,
+                                            &events,
+                                            &cwd,
+                                            Some(&subagent),
+                                        )
+                                        .await
+                                        {
+                                            Ok(t) => t,
+                                            Err(e) => {
+                                                let _ =
+                                                    result.send(Err(OrbitError::Acp(e.to_string())));
+                                                continue;
+                                            }
+                                        };
+                                        let _ = result.send(Ok(text));
+                                    }
+                                }
+                            }
+                            Ok::<_, agent_client_protocol::Error>(())
+                        })
+                        .await;
+
+                    Ok(())
+                })
+                .await;
+        })
+        .await;
+    });
+
+    cmd_tx
 }
 
 #[async_trait]
 impl HarnessSession for AcpSessionHandle {
     async fn run_turn(&mut self, _role: Role, prompt: String) -> Result<TurnOutcome, OrbitError> {
+        if self.cmd_tx.is_none() || self.cmd_tx.as_ref().unwrap().is_closed() {
+            tracing::warn!("ACP session task died, re-spawning...");
+            send_event(&self.events, OrbitEvent::Notice {
+                message: "ACP session task died, re-spawning...".to_string(),
+            });
+            self.cmd_tx = Some(spawn_session_task(
+                self.cmd_str.clone(),
+                self.cwd.clone(),
+                self.timeout_secs,
+                self.events.clone(),
+                self.subagent.clone(),
+            ));
+        }
+
+        let cmd_tx = self.cmd_tx.as_ref().unwrap();
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        cmd_tx
             .send(SessionCommand::RunTurn { prompt, result: tx })
             .map_err(|_| OrbitError::Acp("session task has terminated".to_string()))?;
         let full_text = rx
@@ -316,16 +424,27 @@ pub struct AcpHarness {
     cwd: PathBuf,
     prompt_timeout_secs: u64,
     task_timeout_secs: u64,
+    retry_max_attempts: u32,
+    retry_base_delay: Duration,
 }
 
 impl AcpHarness {
-    pub fn new(command: String, args: Vec<String>, cwd: PathBuf, prompt_timeout_secs: u64) -> Self {
+    pub fn new(
+        command: String,
+        args: Vec<String>,
+        cwd: PathBuf,
+        prompt_timeout_secs: u64,
+        retry_max_attempts: u32,
+        retry_base_delay_ms: u64,
+    ) -> Self {
         Self {
             command,
             args,
             cwd,
             prompt_timeout_secs,
             task_timeout_secs: prompt_timeout_secs,
+            retry_max_attempts,
+            retry_base_delay: Duration::from_millis(retry_base_delay_ms),
         }
     }
 
@@ -343,6 +462,54 @@ impl AcpHarness {
             cwd: self.cwd.clone(),
             task_timeout_secs: self.task_timeout_secs,
         }
+    }
+
+    fn is_transient_error(err: &OrbitError) -> bool {
+        match err {
+            OrbitError::Acp(msg) => {
+                // Command parse failures are fatal — retrying won't change the command string.
+                if msg.starts_with("Failed to create") {
+                    return false;
+                }
+                // Everything else (connection drops, init failures, read errors, timeouts) is transient.
+                true
+            }
+            _ => false,
+        }
+    }
+
+    async fn run_turn_with_retry(
+        &self,
+        prompt: String,
+        events: EventSink,
+    ) -> Result<String, OrbitError> {
+        let mut last_error: Option<OrbitError> = None;
+        for attempt in 1..=self.retry_max_attempts {
+            match self.run_turn_once(prompt.clone(), events.clone()).await {
+                Ok(text) => return Ok(text),
+                Err(e) if Self::is_transient_error(&e) && attempt < self.retry_max_attempts => {
+                    tracing::warn!(
+                        attempt,
+                        max_attempts = self.retry_max_attempts,
+                        error = %e,
+                        "ACP transient error, retrying with backoff"
+                    );
+                    send_event(&events, OrbitEvent::Notice {
+                        message: format!(
+                            "ACP transient error (attempt {}/{}): {}. Retrying...",
+                            attempt, self.retry_max_attempts, e,
+                        ),
+                    });
+                    let delay = self.retry_base_delay * attempt as u32;
+                    tokio::time::sleep(delay).await;
+                    last_error = Some(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
+            OrbitError::Acp("retry exhausted with no preceding error".to_string())
+        }))
     }
 
     async fn run_turn_in_session(
@@ -364,6 +531,13 @@ impl AcpHarness {
         let cwd = self.cwd.clone();
         let timeout = Duration::from_secs(self.prompt_timeout_secs);
         let subagent = self.subagent_config();
+
+        tracing::debug!(
+            command = %cmd_str,
+            cwd = %cwd.display(),
+            timeout_secs = self.prompt_timeout_secs,
+            "spawning ACP agent (one-shot turn)"
+        );
 
         let agent: AcpAgent = match cmd_str.parse() {
             Ok(a) => a,
@@ -420,7 +594,7 @@ impl Harness for AcpHarness {
         let prompt_bytes = prompt.len();
         tracing::info!(role = ?role, prompt_bytes, "turn started");
 
-        let full_text = self.run_turn_once(prompt, events).await?;
+        let full_text = self.run_turn_with_retry(prompt, events).await?;
 
         tracing::info!(
             role = ?role,
@@ -440,73 +614,30 @@ impl Harness for AcpHarness {
         let cwd = self.cwd.clone();
         let timeout_secs = self.prompt_timeout_secs;
         let subagent = self.subagent_config();
-        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
 
-        tokio::spawn(async move {
-            let agent: AcpAgent = match cmd_str.parse() {
-                Ok(a) => a,
-                Err(e) => {
-                    tracing::error!("Failed to create ACP agent: {e}");
-                    return;
-                }
-            };
+        tracing::debug!(
+            command = %cmd_str,
+            cwd = %cwd.display(),
+            timeout_secs,
+            "starting persistent ACP session"
+        );
 
-            let timeout = Duration::from_secs(timeout_secs);
-            let _ = tokio::time::timeout(timeout, async {
-                let _ = Client
-                    .builder()
-                    .on_receive_request(
-                        async move |request: RequestPermissionRequest,
-                                    responder: Responder<RequestPermissionResponse>,
-                                    _cx: ConnectionTo<Agent>| {
-                            let outcome = auto_approve(&request);
-                            responder.respond(RequestPermissionResponse::new(outcome))
-                        },
-                        on_receive_request!(),
-                    )
-                    .connect_with(agent, async move |cx: ConnectionTo<Agent>| {
-                        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
-                            .block_task()
-                            .await
-                            .map_err(|e| {
-                                tracing::error!("Session init failed: {e}");
-                                e
-                            })?;
+        let cmd_tx = spawn_session_task(
+            cmd_str.clone(),
+            cwd.clone(),
+            timeout_secs,
+            events.clone(),
+            subagent.clone(),
+        );
 
-                        let _ = cx
-                            .build_session(&cwd)
-                            .block_task()
-                            .run_until(async move |mut session| {
-                                while let Some(cmd) = cmd_rx.recv().await {
-                                    match cmd {
-                                        SessionCommand::RunTurn { prompt, result } => {
-                                            let text = match Self::run_turn_in_session(
-                                                &mut session, &prompt, &events, &cwd, Some(&subagent),
-                                            )
-                                            .await
-                                            {
-                                                Ok(t) => t,
-                                                Err(e) => {
-                                                    let _ = result.send(Err(OrbitError::Acp(e.to_string())));
-                                                    continue;
-                                                }
-                                            };
-                                            let _ = result.send(Ok(text));
-                                        }
-                                    }
-                                }
-                                Ok::<_, agent_client_protocol::Error>(())
-                            })
-                            .await;
-
-                        Ok(())
-                    })
-                    .await;
-            })
-            .await;
-        });
-
-        Ok(Box::new(AcpSessionHandle { cmd_tx }))
+        Ok(Box::new(AcpSessionHandle {
+            cmd_tx: Some(cmd_tx),
+            cmd_str,
+            cwd,
+            timeout_secs,
+            events,
+            subagent,
+        }))
     }
 }
 
@@ -515,14 +646,20 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    #[tokio::test]
-    async fn test_run_turn_applies_timeout() {
-        let harness = AcpHarness::new(
+    fn test_harness(timeout_secs: u64) -> AcpHarness {
+        AcpHarness::new(
             "sleep".to_string(),
             vec!["999999".to_string()],
             PathBuf::from("/tmp"),
-            1,
-        );
+            timeout_secs,
+            3,
+            50,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_run_turn_applies_timeout() {
+        let harness = test_harness(1);
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let result = harness.run_turn(Role::Coder, "test prompt".to_string(), tx).await;
@@ -534,5 +671,118 @@ mod tests {
             err_msg.contains("timeout") || err_msg.contains("did not respond"),
             "Expected timeout-related error message, got: {err_msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_retry_succeeds_after_transient_failures() {
+        let harness = AcpHarness::new(
+            "sleep".to_string(),
+            vec!["999999".to_string()],
+            PathBuf::from("/tmp"),
+            1,  // short timeout — each attempt will time out
+            3,  // retry up to 3 times
+            10, // 10ms base delay (fast for tests)
+        );
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = harness.run_turn(Role::Coder, "test prompt".to_string(), tx).await;
+
+        // After 3 transient failures, should still get a timeout error
+        assert!(result.is_err(), "Expected error after exhausting retries");
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("timeout") || err_msg.contains("did not respond"),
+            "Expected timeout-related error message, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fatal_error_not_retried() {
+        // A command that fails to parse should fail immediately without retry
+        let harness = AcpHarness::new(
+            "".to_string(),
+            vec![],
+            PathBuf::from("/tmp"),
+            10,
+            3,
+            50,
+        );
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = harness.run_turn(Role::Coder, "test".to_string(), tx).await;
+
+        assert!(result.is_err(), "Expected error from empty command");
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("Failed to create"),
+            "Expected fatal parse error, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_recovers_after_death() {
+        let harness = test_harness(5);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut session = harness.start_session(tx).await.unwrap();
+
+        // First turn — the session task is alive but the agent won't respond.
+        let first = session.run_turn(Role::Coder, "turn 1".to_string()).await;
+        assert!(first.is_err(), "Expected error from unresponsive agent");
+
+        // Second turn — even if the spawned task died from the timeout,
+        // the handle should re-spawn and attempt a new connection.
+        // The re-spawn will also time out (the agent is still unresponsive),
+        // but crucially the call does not hang forever or panic.
+        let second = session.run_turn(Role::Coder, "turn 2".to_string()).await;
+        assert!(second.is_err(), "Expected error on second turn after re-spawn");
+    }
+
+    #[tokio::test]
+    async fn test_retry_count_respected() {
+        // With retry_max_attempts = 1, only one attempt is made (no retry).
+        let harness = AcpHarness::new(
+            "sleep".to_string(),
+            vec!["999999".to_string()],
+            PathBuf::from("/tmp"),
+            1, // quick timeout
+            1, // only 1 attempt = no retry
+            50,
+        );
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = harness.run_turn(Role::Coder, "test".to_string(), tx).await;
+
+        assert!(result.is_err(), "Expected error with retry_max_attempts=1");
+    }
+
+    #[test]
+    fn test_is_transient_error() {
+        let fatal = OrbitError::Acp("Failed to create ACP agent: parse error".to_string());
+        assert!(!AcpHarness::is_transient_error(&fatal), "parse error should be fatal");
+
+        let fatal2 = OrbitError::Acp("Failed to create subagent: connection refused".to_string());
+        assert!(!AcpHarness::is_transient_error(&fatal2), "subagent create error should be fatal");
+
+        let transient = OrbitError::Acp("Agent did not respond within 30 seconds".to_string());
+        assert!(AcpHarness::is_transient_error(&transient), "timeout should be transient");
+
+        let transient2 = OrbitError::Acp("connection reset".to_string());
+        assert!(AcpHarness::is_transient_error(&transient2), "connection error should be transient");
+
+        let transient3 = OrbitError::Acp("read_update failed: broken pipe".to_string());
+        assert!(AcpHarness::is_transient_error(&transient3), "read error should be transient");
+
+        let non_acp = OrbitError::Other("logic error".to_string());
+        assert!(!AcpHarness::is_transient_error(&non_acp), "non-ACP error should not be retried");
+    }
+
+    #[test]
+    fn test_is_transient_error_empty_cmd() {
+        // Empty command string produces "Failed to create ACP agent: ..."
+        let err = OrbitError::Acp("Failed to create ACP agent: empty command".to_string());
+        assert!(!AcpHarness::is_transient_error(&err));
     }
 }

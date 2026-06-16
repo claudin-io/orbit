@@ -41,9 +41,11 @@ async fn handshake(
     hc: &HarnessConfig,
     cwd: &Path,
     timeout: u64,
+    retry_max_attempts: u32,
+    retry_base_delay_ms: u64,
     events: &EventSink,
 ) -> Result<(), OrbitError> {
-    let harness = make_harness(hc, cwd, timeout);
+    let harness = make_harness(hc, cwd, timeout, retry_max_attempts, retry_base_delay_ms);
     harness
         .run_turn(
             Role::Coder,
@@ -60,6 +62,8 @@ async fn prompt_and_validate(
     label: &str,
     cwd: &Path,
     timeout: u64,
+    retry_max_attempts: u32,
+    retry_base_delay_ms: u64,
     allow_blank: bool,
 ) -> Result<Outcome, OrbitError> {
     loop {
@@ -87,7 +91,7 @@ async fn prompt_and_validate(
         };
 
         notice(events, format!("Testing handshake: {}", hc.to_command_line()));
-        match handshake(&hc, cwd, timeout, events).await {
+        match handshake(&hc, cwd, timeout, retry_max_attempts, retry_base_delay_ms, events).await {
             Ok(()) => {
                 notice(events, format!("✓ {label}: ACP OK"));
                 return Ok(Outcome::Cmd(hc));
@@ -116,6 +120,8 @@ pub async fn run_wizard(events: EventSink) -> Result<(), OrbitError> {
     // Inherit the prompt timeout from any existing config, else the default.
     let existing = config::load(None, &cwd);
     let timeout = existing.r#loop.prompt_timeout_secs;
+    let retry_max = existing.r#loop.acp_retry_max_attempts;
+    let retry_delay = existing.r#loop.acp_retry_base_delay_ms;
 
     notice(&events, "orbit configuration (.orbit)");
 
@@ -158,13 +164,13 @@ pub async fn run_wizard(events: EventSink) -> Result<(), OrbitError> {
     let harness: HarnessConfig;
 
     if !segmented {
-        match prompt_and_validate(&events, "harness", &cwd, timeout, false).await? {
+        match prompt_and_validate(&events, "harness", &cwd, timeout, retry_max, retry_delay, false).await? {
             Outcome::Cmd(hc) => harness = hc,
             Outcome::Cancel => return cancel(&events),
             Outcome::UseBase => unreachable!("blank not allowed for base"),
         }
     } else {
-        match prompt_and_validate(&events, "base (harness)", &cwd, timeout, false).await? {
+        match prompt_and_validate(&events, "base (harness)", &cwd, timeout, retry_max, retry_delay, false).await? {
             Outcome::Cmd(hc) => harness = hc,
             Outcome::Cancel => return cancel(&events),
             Outcome::UseBase => unreachable!("blank not allowed for base"),
@@ -175,7 +181,7 @@ pub async fn run_wizard(events: EventSink) -> Result<(), OrbitError> {
             ("code", &mut steps.code),
             ("eval", &mut steps.evaluation),
         ] {
-            match prompt_and_validate(&events, label, &cwd, timeout, true).await? {
+            match prompt_and_validate(&events, label, &cwd, timeout, retry_max, retry_delay, true).await? {
                 Outcome::Cmd(hc) => *slot = Some(hc),
                 Outcome::UseBase => {} // leave None → falls back to harness
                 Outcome::Cancel => return cancel(&events),

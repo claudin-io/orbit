@@ -8,6 +8,9 @@ pub const ORBIT_VERSION: &str = env!("ORBIT_VERSION");
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
+
+    #[arg(long, global = true, help = "Show verbose internal debug logs on stderr")]
+    pub debug: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -255,6 +258,32 @@ mod tests {
     fn test_config_command_parses() {
         let cli = Cli::parse_from(["orbit", "config"]);
         assert!(matches!(cli.command, Command::Config));
+    }
+
+    #[test]
+    fn test_debug_flag_after_subcommand() {
+        let cli = Cli::parse_from(["orbit", "run", "--spec", "s.md", "--debug"]);
+        assert!(cli.debug);
+        assert!(matches!(cli.command, Command::Run { .. }));
+    }
+
+    #[test]
+    fn test_debug_flag_before_subcommand() {
+        let cli = Cli::parse_from(["orbit", "--debug", "run", "--spec", "s.md"]);
+        assert!(cli.debug);
+    }
+
+    #[test]
+    fn test_debug_flag_on_git_subcommand() {
+        let cli = Cli::parse_from(["orbit", "git", "commit", "--debug"]);
+        assert!(cli.debug);
+        assert!(matches!(cli.command, Command::Git { .. }));
+    }
+
+    #[test]
+    fn test_debug_flag_defaults_false() {
+        let cli = Cli::parse_from(["orbit", "run", "--spec", "s.md"]);
+        assert!(!cli.debug);
     }
 
     #[test]
