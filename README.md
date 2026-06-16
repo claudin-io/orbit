@@ -67,7 +67,7 @@ Orbit is deliberately minimal. Every design decision removes something:
 - **Same pattern, different task** — `orbit git commit` follows the identical loop: Planner → Evaluator (with revision) → Committer. No shared state, no new infrastructure.
 - **Version scheme** — `0.1.YYMMDD` from `build.rs`. The date tells you how fresh the build is.
 
-The complexity budget goes where it matters: JSON sanitization, rubric-based evaluation with weighted criteria, and retry with revision feedback.
+The complexity budget goes where it matters: robust JSON extraction (finds the first balanced JSON object even when agents emit prose before raw unfenced JSON), rubric-based evaluation with weighted criteria, and retry with revision feedback.
 
 ## Usage
 
@@ -224,8 +224,9 @@ per-step overrides get their own. The session flavor depends on the harness:
   task dies, the handle detects the death and re-spawns transparently on the
   next turn.
 
-On session start, the harness emits the resolved command or reported model name
-so the user sees which agent is active before the first turn.
+On session start, the harness emits the model/tool name and the command (binary
+name only, not full arguments) so the user sees which agent is active before the
+first turn.
 
 ### Runtime artifacts
 
@@ -234,7 +235,6 @@ Written to `.orbit/` in the target project:
 ```
 .orbit/
   debug/         # Agent output dumps (on parse failure)
-  logs/          # Structured tracing logs
   project-map.md # Project structure map
   state.json     # Current run state
   summary.md     # Run verdict and key events
@@ -260,6 +260,29 @@ confirmed, the `SessionRouter` switches the current role to the `fallback`
 harness, starts a new session, and retries the turn. If declined, the run fails
 with a `SessionLimit` error. The fallback defaults to the global `harness` when
 no explicit `fallback` is configured.
+
+### Diagnostics & error reports
+
+On every `orbit run`, a detailed usage log is written to a temporary file at
+`$TMPDIR/orbit/orbit-run-<ts>-<pid>.log`. On success the temp file is deleted. On
+an unexpected error or panic the log is preserved and a self-contained report is
+written alongside it at `$TMPDIR/orbit/report-<ts>-<pid>.md` containing:
+
+- Orbit version and OS/architecture
+- The command that was run
+- Global config (`~/.orbit/config.orbit`) and project config
+  (`<target>/.orbit/config.orbit`), both resolved and raw
+- The captured error message
+- The last 80 lines of the usage log (no full conversation)
+
+A notice is then printed to stderr pointing the user at the report file and a
+pre-filled GitHub issue URL:
+
+```
+https://github.com/claudin-io/orbit/issues/new?title=...&body=...
+```
+
+Exhausted/max-attempts runs are a normal outcome — they produce no report.
 
 ### Source layout
 
