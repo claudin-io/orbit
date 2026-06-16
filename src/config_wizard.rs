@@ -1,8 +1,7 @@
 use crate::config::{self, HarnessConfig, StepsConfig};
 use crate::error::OrbitError;
 use crate::events::EventSink;
-use crate::harness::Harness;
-use crate::harness::acp::AcpHarness;
+use crate::harness::make_harness;
 use crate::types::{OrbitEvent, Role};
 use std::path::{Path, PathBuf};
 use tokio::sync::oneshot;
@@ -44,7 +43,7 @@ async fn handshake(
     timeout: u64,
     events: &EventSink,
 ) -> Result<(), OrbitError> {
-    let harness = AcpHarness::new(hc.command.clone(), hc.args.clone(), cwd.to_path_buf(), timeout);
+    let harness = make_harness(hc, cwd, timeout);
     harness
         .run_turn(
             Role::Coder,
@@ -65,29 +64,29 @@ async fn prompt_and_validate(
 ) -> Result<Outcome, OrbitError> {
     loop {
         let hint = if allow_blank {
-            " (Enter = usar base)"
+            " (Enter = use base)"
         } else {
             ""
         };
-        let line = ask(events, format!("Comando ACP para {label}{hint}:")).await?;
+        let line = ask(events, format!("ACP command for {label}{hint}:")).await?;
 
         if line.is_empty() {
             if allow_blank {
                 return Ok(Outcome::UseBase);
             }
-            notice(events, "Comando obrigatório — digite algo.");
+            notice(events, "Command required — please type something.");
             continue;
         }
 
         let hc = match HarnessConfig::parse(&line) {
             Some(hc) => hc,
             None => {
-                notice(events, "Comando inválido.");
+                notice(events, "Invalid command.");
                 continue;
             }
         };
 
-        notice(events, format!("Testando handshake: {}", hc.to_command_line()));
+        notice(events, format!("Testing handshake: {}", hc.to_command_line()));
         match handshake(&hc, cwd, timeout, events).await {
             Ok(()) => {
                 notice(events, format!("✓ {label}: ACP OK"));
@@ -97,7 +96,7 @@ async fn prompt_and_validate(
                 let choice = ask(
                     events,
                     format!(
-                        "{label}: ACP FALHOU: {e}  [r] reescrever  [s] salvar assim  [c] cancelar:"
+                        "{label}: ACP FAILED: {e}  [r] rewrite  [s] save anyway  [c] cancel:"
                     ),
                 )
                 .await?
@@ -118,25 +117,25 @@ pub async fn run_wizard(events: EventSink) -> Result<(), OrbitError> {
     let existing = config::load(None, &cwd);
     let timeout = existing.r#loop.prompt_timeout_secs;
 
-    notice(&events, "Configuração do orbit (.orbit)");
+    notice(&events, "orbit configuration (.orbit)");
 
     // 1. Where to save.
     let save_path: PathBuf = loop {
         let loc = ask(
             &events,
-            "Onde salvar? [1] global (~/.orbit/config.orbit)  [2] projeto (<cwd>/.orbit/config.orbit):",
+            "Where to save? [1] global (~/.orbit/config.orbit)  [2] project (<cwd>/.orbit/config.orbit):",
         )
         .await?;
         match loc.as_str() {
             "1" => match config::home_config_path() {
                 Some(p) => break p,
                 None => {
-                    notice(&events, "HOME não definido — escolha [2] projeto.");
+                    notice(&events, "HOME not set — choose [2] project.");
                     continue;
                 }
             },
             "2" => break config::project_config_path(&cwd),
-            _ => notice(&events, "Opção inválida. Digite 1 ou 2."),
+            _ => notice(&events, "Invalid option. Type 1 or 2."),
         }
     };
 
@@ -144,13 +143,13 @@ pub async fn run_wizard(events: EventSink) -> Result<(), OrbitError> {
     let segmented = loop {
         let mode = ask(
             &events,
-            "ACP: [1] mesmo para todos  [2] por step (plan/code/eval):",
+            "ACP: [1] same for all  [2] per step (plan/code/eval):",
         )
         .await?;
         match mode.as_str() {
             "1" => break false,
             "2" => break true,
-            _ => notice(&events, "Opção inválida. Digite 1 ou 2."),
+            _ => notice(&events, "Invalid option. Type 1 or 2."),
         }
     };
 
@@ -187,12 +186,12 @@ pub async fn run_wizard(events: EventSink) -> Result<(), OrbitError> {
     // 4. Write.
     config::write_orbit_config(&save_path, &harness, &steps)
         .map_err(|e| OrbitError::Config(format!("failed to write config: {e}")))?;
-    notice(&events, format!("Salvo em {}", save_path.display()));
+    notice(&events, format!("Saved to {}", save_path.display()));
 
     Ok(())
 }
 
 fn cancel(events: &EventSink) -> Result<(), OrbitError> {
-    notice(events, "Cancelado. Nada salvo.");
+    notice(events, "Cancelled. Nothing saved.");
     Ok(())
 }

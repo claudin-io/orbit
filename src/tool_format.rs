@@ -47,8 +47,18 @@ fn shorten_path(path: &str, cwd: &Path) -> String {
     prefixed
 }
 
+/// Look up a field by its ACP camelCase name, falling back to the native
+/// `claude` snake_case name (e.g. `filePath` then `file_path`).
+fn get_str<'a>(
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+    camel: &str,
+    snake: &str,
+) -> Option<&'a str> {
+    obj.get(camel).or_else(|| obj.get(snake)).and_then(|v| v.as_str())
+}
+
 fn fmt_read(obj: &serde_json::Map<String, serde_json::Value>, cwd: &Path) -> Option<String> {
-    let path = obj.get("filePath")?.as_str()?;
+    let path = get_str(obj, "filePath", "file_path")?;
     let rel = shorten_path(path, cwd);
     let offset = obj.get("offset").and_then(|v| v.as_u64());
     let limit = obj.get("limit").and_then(|v| v.as_u64());
@@ -61,7 +71,7 @@ fn fmt_read(obj: &serde_json::Map<String, serde_json::Value>, cwd: &Path) -> Opt
 }
 
 fn fmt_file_op(_name: &str, obj: &serde_json::Map<String, serde_json::Value>, cwd: &Path) -> Option<String> {
-    let path = obj.get("filePath")?.as_str()?;
+    let path = get_str(obj, "filePath", "file_path")?;
     let rel = shorten_path(path, cwd);
     Some(format!("({})", rel))
 }

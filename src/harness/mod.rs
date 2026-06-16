@@ -1,14 +1,41 @@
 pub mod acp;
+pub mod claude;
 #[cfg(test)]
 pub mod fake;
 
-use crate::config::Config;
+use crate::config::{Config, HarnessConfig};
 use crate::events::EventSink;
 use crate::harness::acp::AcpHarness;
+use crate::harness::claude::{is_native_claude, ClaudeHarness};
 use crate::types::{Role, TurnOutcome};
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Build the right harness for `hc`: the native [`ClaudeHarness`] when the
+/// command is the `claude` CLI (which doesn't speak ACP), otherwise the generic
+/// [`AcpHarness`].
+pub fn make_harness(
+    hc: &HarnessConfig,
+    target: &Path,
+    prompt_timeout_secs: u64,
+) -> Box<dyn Harness> {
+    if is_native_claude(&hc.command) {
+        Box::new(ClaudeHarness::new(
+            hc.command.clone(),
+            hc.args.clone(),
+            target.to_path_buf(),
+            prompt_timeout_secs,
+        ))
+    } else {
+        Box::new(AcpHarness::new(
+            hc.command.clone(),
+            hc.args.clone(),
+            target.to_path_buf(),
+            prompt_timeout_secs,
+        ))
+    }
+}
 
 #[async_trait]
 pub trait Harness: Send + Sync {
@@ -67,12 +94,7 @@ impl SessionRouter {
         };
 
         if !self.sessions.contains_key(&key) {
-            let harness = AcpHarness::new(
-                hc.command,
-                hc.args,
-                self.target.clone(),
-                self.config.r#loop.prompt_timeout_secs,
-            );
+            let harness = make_harness(&hc, &self.target, self.config.r#loop.prompt_timeout_secs);
             let sess = harness.start_session(self.events.clone()).await?;
             self.sessions.insert(key.clone(), sess);
         }

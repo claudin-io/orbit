@@ -3,8 +3,7 @@ use crate::cli::Cli;
 use crate::config;
 use crate::error::OrbitError;
 use crate::events::{EventSink, emit};
-use crate::harness::{Harness, HarnessSession, SessionRouter};
-use crate::harness::acp::AcpHarness;
+use crate::harness::{HarnessSession, SessionRouter};
 use crate::prompts::{EVALUATOR_TEMPLATE, PROMPTER_REVISION_TEMPLATE, PROMPTER_TEMPLATE, extract_fenced_json, render, sanitize_llm_json};
 use crate::types::{EvalVerdict, OrbitEvent, PrompterOutput, Role, RunPhase};
 use std::collections::HashMap;
@@ -28,10 +27,9 @@ pub async fn dispatch(cli: Cli, events: EventSink) -> Result<(), OrbitError> {
             AcpAction::Handshake => {
                 let target = std::env::current_dir().unwrap_or_default();
                 let config = config::load(None, &target);
-                let harness = AcpHarness::new(
-                    config.harness.command.clone(),
-                    config.harness.args.clone(),
-                    target,
+                let harness = crate::harness::make_harness(
+                    &config.harness,
+                    &target,
                     config.r#loop.prompt_timeout_secs,
                 );
                 println!(
@@ -116,6 +114,11 @@ async fn run_simple_loop(run_config: config::RunConfig, events: EventSink) -> Re
         run_prompter(session, &spec_content).await?
     };
     let prompt_summary = extract_goal(&prompter_output.prompt);
+    tracing::debug!(
+        goal = %prompt_summary,
+        rubric_items = prompter_output.rubric.len(),
+        "prompter produced goal and rubric"
+    );
 
     emit!(
         events,
@@ -138,11 +141,13 @@ async fn run_simple_loop(run_config: config::RunConfig, events: EventSink) -> Re
             }
         );
 
+        tracing::debug!(role = ?Role::Coder, attempt, prompt_len = prompt.len(), prompt = %prompt, "sending prompt");
         let coder_outcome = {
             let session = router.session_for(Role::Coder).await?;
             session.run_turn(Role::Coder, prompt.clone()).await?
         };
         let coder_text = coder_outcome.full_text;
+        tracing::debug!(role = ?Role::Coder, attempt, output_len = coder_text.len(), output = %coder_text, "agent output");
 
         let coder_summary = summarize_coder_output(&coder_text);
         emit!(events, OrbitEvent::CoderOutput {
@@ -242,7 +247,9 @@ async fn run_prompter(
     let mut ctx = HashMap::new();
     ctx.insert("spec", spec);
     let prompt = render(PROMPTER_TEMPLATE, &ctx);
+    tracing::debug!(role = ?Role::Prompter, prompt_len = prompt.len(), prompt = %prompt, "sending prompt");
     let outcome = session.run_turn(Role::Prompter, prompt).await?;
+    tracing::debug!(role = ?Role::Prompter, output_len = outcome.full_text.len(), output = %outcome.full_text, "agent output");
     parse_prompter_output(&outcome.full_text)
 }
 
@@ -259,7 +266,16 @@ async fn run_prompter_revision(
     ctx.insert("eval_feedback", eval_feedback);
     ctx.insert("eval_diagnosis", eval_diagnosis);
     let prompt = render(PROMPTER_REVISION_TEMPLATE, &ctx);
+    tracing::debug!(
+        role = ?Role::Prompter,
+        prompt_len = prompt.len(),
+        eval_feedback,
+        eval_diagnosis,
+        prompt = %prompt,
+        "sending prompt (revision)"
+    );
     let outcome = session.run_turn(Role::Prompter, prompt).await?;
+    tracing::debug!(role = ?Role::Prompter, output_len = outcome.full_text.len(), output = %outcome.full_text, "agent output");
     let parsed = parse_prompter_output(&outcome.full_text)?;
     Ok(parsed.prompt)
 }
@@ -275,7 +291,9 @@ async fn run_evaluator(
     ctx.insert("rubric", rubric);
     ctx.insert("coder_output", coder_output);
     let prompt = render(EVALUATOR_TEMPLATE, &ctx);
+    tracing::debug!(role = ?Role::Evaluator, prompt_len = prompt.len(), prompt = %prompt, "sending prompt");
     let outcome = session.run_turn(Role::Evaluator, prompt).await?;
+    tracing::debug!(role = ?Role::Evaluator, output_len = outcome.full_text.len(), output = %outcome.full_text, "agent output");
     parse_eval_verdict(&outcome.full_text)
 }
 
@@ -359,6 +377,7 @@ mod tests {
     use super::*;
     use crate::events;
     use crate::harness::fake::FakeHarness;
+    use crate::harness::Harness;
 
     #[test]
     fn test_parse_prompter_output_valid() {

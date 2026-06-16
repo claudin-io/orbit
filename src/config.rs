@@ -24,7 +24,9 @@ impl Default for HarnessConfig {
 }
 
 fn default_harness_command() -> String {
-    "claude-code-acp".to_string()
+    // The native `claude` CLI: orbit talks to it directly over stream-json
+    // (see harness::claude), so no ACP adapter needs to be installed.
+    "claude".to_string()
 }
 
 /// Per-step ACP overrides. A step with `None` falls back to [`Config::harness`].
@@ -169,22 +171,44 @@ pub fn project_config_path(target: &Path) -> PathBuf {
 pub fn load(explicit: Option<&str>, target: &Path) -> Config {
     let mut cfg = Config::default();
 
-    if let Some(global) = home_config_path()
-        && let Ok(contents) = std::fs::read_to_string(&global)
-    {
-        apply_orbit_config(&mut cfg, &contents);
+    if let Some(global) = home_config_path() {
+        match std::fs::read_to_string(&global) {
+            Ok(contents) => {
+                tracing::debug!(path = %global.display(), "loading global config");
+                apply_orbit_config(&mut cfg, &contents);
+            }
+            Err(_) => tracing::debug!(path = %global.display(), "no global config"),
+        }
     }
 
     let project = project_config_path(target);
-    if let Ok(contents) = std::fs::read_to_string(&project) {
-        apply_orbit_config(&mut cfg, &contents);
+    match std::fs::read_to_string(&project) {
+        Ok(contents) => {
+            tracing::debug!(path = %project.display(), "loading project config");
+            apply_orbit_config(&mut cfg, &contents);
+        }
+        Err(_) => tracing::debug!(path = %project.display(), "no project config"),
     }
 
-    if let Some(explicit_path) = explicit
-        && let Ok(contents) = std::fs::read_to_string(explicit_path)
-    {
-        apply_orbit_config(&mut cfg, &contents);
+    if let Some(explicit_path) = explicit {
+        match std::fs::read_to_string(explicit_path) {
+            Ok(contents) => {
+                tracing::debug!(path = explicit_path, "loading explicit config");
+                apply_orbit_config(&mut cfg, &contents);
+            }
+            Err(e) => tracing::debug!(path = explicit_path, error = %e, "explicit config unreadable"),
+        }
     }
+
+    tracing::debug!(
+        harness = %cfg.harness.to_command_line(),
+        plan = ?cfg.steps.plan.as_ref().map(|h| h.to_command_line()),
+        code = ?cfg.steps.code.as_ref().map(|h| h.to_command_line()),
+        eval = ?cfg.steps.evaluation.as_ref().map(|h| h.to_command_line()),
+        max_attempts = cfg.r#loop.max_attempts,
+        timeout_secs = cfg.r#loop.prompt_timeout_secs,
+        "config resolved"
+    );
 
     cfg
 }
@@ -318,7 +342,7 @@ timeout 900
         let mut cfg = Config::default();
         apply_orbit_config(&mut cfg, "# just a comment\n\n   \nbogus directive here\n");
         // Nothing changed from defaults.
-        assert_eq!(cfg.harness.command, "claude-code-acp");
+        assert_eq!(cfg.harness.command, "claude");
         assert!(cfg.steps.plan.is_none());
     }
 
