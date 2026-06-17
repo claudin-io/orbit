@@ -57,11 +57,6 @@ pub enum Command {
 
 #[derive(Subcommand, Debug)]
 pub enum AcpAction {
-    #[command(name = "set-default")]
-    SetDefault {
-        command: String,
-    },
-
     #[command(name = "handshake")]
     Handshake,
 }
@@ -239,18 +234,6 @@ mod tests {
         match &cli.command {
             Command::Run { max_attempts, .. } => assert_eq!(*max_attempts, Some(3)),
             _ => panic!("expected Run"),
-        }
-    }
-
-    #[test]
-    fn test_acp_set_default_parses() {
-        let cli = Cli::parse_from(["orbit", "acp", "set-default", "opencode acp"]);
-        match &cli.command {
-            Command::Acp { action } => match action {
-                AcpAction::SetDefault { command } => assert_eq!(command, "opencode acp"),
-                _ => panic!("expected SetDefault"),
-            },
-            _ => panic!("expected Acp"),
         }
     }
 

@@ -248,38 +248,6 @@ pub struct RunConfig {
     pub spec_path: PathBuf,
 }
 
-/// Persist the default harness command into `~/.orbit/config.orbit`,
-/// preserving any existing `step`/`max_attempts`/`timeout` lines.
-pub fn save_acp_default(config_path: &Path, command_str: &str) -> anyhow::Result<()> {
-    let command_str = command_str.trim();
-    if command_str.is_empty() {
-        return Err(anyhow::anyhow!("Empty ACP command"));
-    }
-
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    // Preserve all non-`harness` lines from any existing config.
-    let mut lines: Vec<String> = Vec::new();
-    if let Ok(existing) = std::fs::read_to_string(config_path) {
-        for line in existing.lines() {
-            if line.trim_start().starts_with("harness") {
-                continue;
-            }
-            lines.push(line.to_string());
-        }
-    }
-
-    let mut out = format!("harness {command_str}\n");
-    for line in lines {
-        out.push_str(&line);
-        out.push('\n');
-    }
-    std::fs::write(config_path, out)?;
-    Ok(())
-}
-
 /// Write a full `.orbit` config: the `harness` line followed by `step` lines for
 /// each configured step. Any existing `max_attempts`/`timeout`/comment lines are
 /// preserved (only `harness`/`step` lines are replaced).
@@ -407,25 +375,6 @@ timeout 900
         apply_orbit_config(&mut cfg, "harness second");
         assert_eq!(cfg.harness.command, "second");
         assert_eq!(cfg.r#loop.max_attempts, 3);
-    }
-
-    #[test]
-    fn test_save_acp_default_preserves_steps() {
-        let dir = std::env::temp_dir().join(format!("orbit-cfg-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.orbit");
-        std::fs::write(&path, "harness old-acp\nstep code = opencode --acp\nmax_attempts 4\n").unwrap();
-
-        save_acp_default(&path, "claude-code-acp --debug").unwrap();
-
-        let contents = std::fs::read_to_string(&path).unwrap();
-        assert!(contents.contains("harness claude-code-acp --debug"));
-        assert!(contents.contains("step code = opencode --acp"));
-        assert!(contents.contains("max_attempts 4"));
-        // Only one harness line.
-        assert_eq!(contents.matches("harness ").count(), 1);
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

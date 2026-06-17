@@ -176,9 +176,9 @@ mod tests {
 
     #[test]
     fn test_grep_with_include() {
-        let raw = json!({"pattern":"fn save_acp_default|fn load_acp_default","include":"*.rs"});
+        let raw = json!({"pattern":"fn write_orbit_config|fn load","include":"*.rs"});
         let result = fmt_tool_call("grep", &Some(raw), &cwd());
-        assert_eq!(result, Some("(fn save_acp_default|fn load_acp_default, *.rs)".into()));
+        assert_eq!(result, Some("(fn write_orbit_config|fn load, *.rs)".into()));
     }
 
     #[test]

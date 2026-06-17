@@ -16,13 +16,6 @@ pub async fn dispatch(cli: Cli, events: EventSink) -> Result<(), OrbitError> {
         Command::Git { action } => crate::git::dispatch(action, events).await,
         Command::Config => crate::config_wizard::run_wizard(events).await,
         Command::Acp { action } => match action {
-            AcpAction::SetDefault { command } => {
-                let config_path = config::home_config_path()
-                    .ok_or_else(|| OrbitError::Config("HOME not set".to_string()))?;
-                config::save_acp_default(&config_path, command)?;
-                println!("Saved default ACP command: {}", command);
-                Ok(())
-            }
             AcpAction::Handshake => {
                 let target = std::env::current_dir().unwrap_or_default();
                 let config = config::load(None, &target);

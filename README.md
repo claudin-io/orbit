@@ -131,7 +131,6 @@ Existing `max_attempts`/`timeout`/comment lines in the file are preserved.
 ### `orbit acp` — manage ACP agent
 
 ```bash
-orbit acp set-default "opencode acp"   # save default to ~/.orbit/config.orbit
 orbit acp handshake                     # test connectivity
 ```
 
